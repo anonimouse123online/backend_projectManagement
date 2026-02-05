@@ -1,0 +1,6 @@
+Node.js Express APIThis is a robust backend service built with Express 5.x, featuring built-in security middleware, compression, and rate limiting.🚀 Getting StartedFollow these steps to get your development environment running.1. PrerequisitesEnsure you have Node.js installed (v18 or higher recommended).2. InstallationClone the repository and install the dependencies:Bashnpm install
+Note: download this please after installing3. Environment SetupCreate a .env file in the root directory to manage your environment variables (supported by dotenv):PlaintextPORT=3000
+NODE_ENV=development
+4. Running the AppDevelopment (with hot-reload):Bashnpm run dev
+Production:Bashnpm start
+🛠 Features IncludedPackagePurposeExpress 5.2The latest web framework for Node.js.HelmetSecures Express apps by setting various HTTP headers.Express Rate LimitBasic rate-limiting middleware to prevent Brute-force/DDoS.CompressionDecreases the size of the response body to increase speed.CORSConfigures Cross-Origin Resource Sharing.🧹 Code QualityWe use ESLint and Prettier to maintain high code standards.Linting: npm run lintFormatting: npm run format
