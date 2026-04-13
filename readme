@@ -4,3 +4,18 @@ NODE_ENV=development
 4. Running the AppDevelopment (with hot-reload):Bashnpm run dev
 Production:Bashnpm start
 🛠 Features IncludedPackagePurposeExpress 5.2The latest web framework for Node.js.HelmetSecures Express apps by setting various HTTP headers.Express Rate LimitBasic rate-limiting middleware to prevent Brute-force/DDoS.CompressionDecreases the size of the response body to increase speed.CORSConfigures Cross-Origin Resource Sharing.🧹 Code QualityWe use ESLint and Prettier to maintain high code standards.Linting: npm run lintFormatting: npm run format
+
+/backend
+├── src/
+│   ├── config/          # Database connection &    environment variables
+│   ├── controllers/     # Logic for handling requests/responses
+│   ├── middlewares/     # Auth, Rate limiting (you have the dependency), Error handling
+│   ├── models/          # Database schemas (PostgreSQL or MongoDB)
+│   ├── routes/          # Definition of API endpoints
+│   ├── services/        # Complex business logic (e.g., Project stats)
+│   ├── utils/           # Reusable helper functions
+│   └── app.js           # Entry point
+├── .env                 # Sensitive info (DB_URL, JWT_SECRET)
+├── .eslintrc.json       # Config for ESLint
+├── .prettierrc          # Config for Prettier
+└── package.json
