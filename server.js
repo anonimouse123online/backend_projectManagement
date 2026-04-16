@@ -28,7 +28,7 @@ app.use('/', routes);
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 
 // ─── Connect DB first, then start server ─────────────────
 pool.connect()

@@ -21,9 +21,9 @@ exports.getProjects = async (req, res) => {
       `SELECT
          name,
          client AS pm,
-         TO_CHAR(due_date, 'Mon DD, YYYY') AS date,
+         TO_CHAR(end_date, 'Mon DD, YYYY') AS date,
          status,
-         progress AS prog
+         COALESCE(phase, '—') AS prog
        FROM projects
        ORDER BY created_at DESC`
     );
