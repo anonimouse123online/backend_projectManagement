@@ -4,6 +4,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const routes = require('./routes/index');
 const pool = require('./db');
+const { startScheduler } = require('./services/schedulerService'); // ← ADD THIS
 
 const app = express();
 
@@ -29,10 +30,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// ❌ REMOVE these two lines — already handled in routes/index.js
-// const taskRoutes = require('./routes/taskRoutes');
-// app.use('/tasks', taskRoutes);
-
 // ✅ All routes go through here
 app.use('/', routes);
 
@@ -44,6 +41,9 @@ pool.connect()
   .then(client => {
     console.log('✅ Connected to PostgreSQL — updated_sitepulse');
     client.release();
+
+    startScheduler(); // ← ADD THIS — starts the 6PM daily report cron job
+
     app.listen(PORT, () => {
       console.log(`🚀 Server running on http://localhost:${PORT}`);
       console.log(`   AUTH     → http://localhost:${PORT}/auth/signup`);

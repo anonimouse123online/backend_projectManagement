@@ -1,0 +1,7 @@
+node_modules/
+ai_service/moondream2/
+.env
+*.bin
+*.pt
+*.safetensors
+__pycache__/

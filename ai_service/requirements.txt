@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+torch
+torchvision
+transformers
+accelerate
+Pillow
+python-multipart
+timm
+einops
+huggingface_hub
+pydantic
