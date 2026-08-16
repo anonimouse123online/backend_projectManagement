@@ -4,36 +4,43 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const routes = require('./routes/index');
 const pool = require('./db');
-const { startScheduler } = require('./services/schedulerService'); // ← ADD THIS
+const { startScheduler } = require('./services/schedulerService');
+const { verifyToken } = require('./middlewares/authMiddleware');
 
 const app = express();
 
 app.use(helmet());
 
+// ─── CORS — use env variable instead of wildcard ────────────────────────────
+const corsOrigin = process.env.CORS_ORIGIN || 'http://localhost:5173';
 app.use(cors({
-  origin: '*',
+  origin: corsOrigin,
   methods: ['GET', 'POST', 'PATCH', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
 app.use(express.json({ limit: '25mb' }));
 
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: { error: 'Too many requests, please try again later.' },
-});
-app.use('/auth', authLimiter);
-
+// ─── Request logger ─────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   console.log(`${req.method} ${req.url}`);
   next();
 });
 
+// ─── Public routes (no auth required) ───────────────────────────────────────
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
+// ─── Auth middleware — protect everything except /auth/* and /health ─────────
+app.use((req, res, next) => {
+  // Skip auth for login, signup, and health check
+  if (req.path.startsWith('/auth/') || req.path === '/health') {
+    return next();
+  }
+  verifyToken(req, res, next);
+});
+
 // ✅ All routes go through here
 app.use('/', routes);
-
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 const PORT = process.env.PORT || 5001;
 
@@ -42,7 +49,7 @@ pool.connect()
     console.log('✅ Connected to PostgreSQL — updated_sitepulse');
     client.release();
 
-    startScheduler(); // ← ADD THIS — starts the 6PM daily report cron job
+    startScheduler();
 
     app.listen(PORT, () => {
       console.log(`🚀 Server running on http://localhost:${PORT}`);

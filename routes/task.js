@@ -6,7 +6,9 @@ router.get('/',             taskController.getTasks);
 router.get('/users',        taskController.getUsers);
 router.get('/:id',          taskController.getTaskById);
 router.post('/',            taskController.createTask);
-router.patch('/:id/status', taskController.updateTaskStatus);
+router.patch('/:id/status',   taskController.updateTaskStatus);
+router.patch('/:id/subtasks', taskController.updateTaskSubtasks);
+router.patch('/:id/assign',   taskController.assignTask);
 
 router.post('/:id/images', function(req, res, next) {
   taskController.upload.array('images', 20)(req, res, function(err) {

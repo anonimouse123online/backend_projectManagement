@@ -64,30 +64,51 @@
     console.log('  first image size (chars):', requestPayload.images[0]?.length);
     console.log(`[AI] Sending ${base64Images.length} image(s) to FastAPI as JSON...`);
 
-    const response = await fetch(`${AI_SERVICE_URL}/generate-report`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify(requestPayload),
-    });
+    // ── Retry logic with exponential backoff ──────────────────────────────────
+    const MAX_RETRIES = 3;
+    const BASE_DELAY_MS = 2000;
+    let lastError;
 
-    console.log('[AI] FastAPI response status:', response.status);
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const response = await fetch(`${AI_SERVICE_URL}/generate-report`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify(requestPayload),
+          signal:  AbortSignal.timeout(600000), // 10 min timeout for CPU inference
+        });
 
-    if (!response.ok) {
-        const errText = await response.text();
-        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.error('[AI] ❌ FastAPI returned', response.status);
-        console.error('[AI] Error body:', errText);
-        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        throw new Error(`AI service error (${response.status}): ${errText}`);
+        console.log(`[AI] FastAPI response status: ${response.status} (attempt ${attempt}/${MAX_RETRIES})`);
+
+        if (!response.ok) {
+          const errText = await response.text();
+          console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          console.error('[AI] ❌ FastAPI returned', response.status);
+          console.error('[AI] Error body:', errText);
+          console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          throw new Error(`AI service error (${response.status}): ${errText}`);
+        }
+
+        const result = await response.json();
+        console.log('[AI] ✅ Report received from FastAPI');
+
+        return {
+          report:       result.report,
+          observations: result.observations,
+        };
+      } catch (err) {
+        lastError = err;
+        console.error(`[AI] ❌ Attempt ${attempt}/${MAX_RETRIES} failed: ${err.message}`);
+
+        if (attempt < MAX_RETRIES) {
+          const delay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
+          console.log(`[AI] Retrying in ${delay / 1000}s...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
     }
 
-    const result = await response.json();
-    console.log('[AI] ✅ Report received from FastAPI');
-
-    return {
-        report:       result.report,
-        observations: result.observations,
-    };
+    throw lastError || new Error('AI report generation failed after all retries.');
     };
 
     /**
