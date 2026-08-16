@@ -149,11 +149,9 @@ def generate_report(
     with torch.no_grad():
         output_ids = qwen_model.generate(
             **inputs,
-            max_new_tokens=200,        # ✅ was 600 — biggest speed win
-            do_sample=False,           # ✅ greedy decoding — faster + deterministic
+            max_new_tokens=512,        # Increased from 200 — prevents reports from being cut off
+            do_sample=False,           # greedy decoding — faster + deterministic
             pad_token_id=qwen_tokenizer.eos_token_id,
-            # Removed: temperature, top_p, top_k, repetition_penalty
-            # — all ignored when do_sample=False, no point computing them
         )
 
     generated = output_ids[0][inputs["input_ids"].shape[1]:]

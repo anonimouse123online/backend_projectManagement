@@ -8,5 +8,6 @@ router.get('/monitor',    dashboardController.getMonitorItems);
 router.get('/rfis',       dashboardController.getRFIs);
 router.get('/notes',      dashboardController.getNotes);
 router.get('/gauge',      dashboardController.getGaugeStats);
+router.get('/progress',   dashboardController.getOverallProgress);
 
 module.exports = router;

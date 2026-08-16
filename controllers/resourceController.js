@@ -2,6 +2,32 @@ const pool = require('../db');
 
 exports.getResources = async (req, res) => {
   try {
+    const { category, status, project, search } = req.query;
+    const conditions = [];
+    const params = [];
+
+    if (category && category !== 'All Resources' && category !== 'All Categories') {
+      params.push(category);
+      conditions.push(`category ILIKE $${params.length}`);
+    }
+
+    if (status && status !== 'All' && status !== 'All Status') {
+      params.push(status);
+      conditions.push(`status ILIKE $${params.length}`);
+    }
+
+    if (project && project !== 'All Projects') {
+      params.push(project);
+      conditions.push(`project ILIKE $${params.length}`);
+    }
+
+    if (search) {
+      params.push(`%${search}%`);
+      conditions.push(`(name ILIKE $${params.length} OR supplier ILIKE $${params.length} OR project ILIKE $${params.length})`);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
     const { rows } = await pool.query(
       `SELECT
          id, name, supplier, category,
@@ -9,7 +35,9 @@ exports.getResources = async (req, res) => {
          unit_price AS "unitPrice", project, status,
          TO_CHAR(updated_at, 'Mon DD, YYYY') AS "updatedAt"
        FROM resources
-       ORDER BY created_at DESC`
+       ${where}
+       ORDER BY created_at DESC`,
+      params
     );
     res.json({ success: true, data: rows });
   } catch (err) {

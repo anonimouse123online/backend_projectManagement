@@ -37,9 +37,44 @@ exports.upload = multer({
 
 // ─── GET ALL TASKS ────────────────────────────────────────────────────────────
 exports.getTasks = async function(req, res) {
-  console.log('[ROUTE] GET /tasks  project_id:', req.query.project_id || 'none');
+  const { project_id, status, phase, priority, assignee_id, search } = req.query;
+  console.log('[ROUTE] GET /tasks filters:', { project_id, status, phase, priority, assignee_id, search });
   try {
-    const project_id = req.query.project_id;
+    const conditions = [];
+    const params = [];
+
+    if (project_id) {
+      params.push(project_id);
+      conditions.push(`(t.project_id::text = $${params.length} OR p.code = $${params.length})`);
+    }
+
+    if (status && status !== 'All' && status !== 'All Statuses') {
+      params.push(`%${status.replace('-', '%')}%`);
+      conditions.push(`t.status ILIKE $${params.length}`);
+    }
+
+    if (phase && phase !== 'All') {
+      params.push(`%${phase}%`);
+      conditions.push(`t.phase ILIKE $${params.length}`);
+    }
+
+    if (priority && priority !== 'All') {
+      params.push(priority);
+      conditions.push(`t.priority ILIKE $${params.length}`);
+    }
+
+    if (assignee_id) {
+      params.push(assignee_id);
+      conditions.push(`(t.assignee_id::text = $${params.length} OR u.full_name ILIKE $${params.length})`);
+    }
+
+    if (search) {
+      params.push(`%${search}%`);
+      conditions.push(`(t.task_name ILIKE $${params.length} OR t.site_instructions ILIKE $${params.length} OR p.name ILIKE $${params.length} OR p.code ILIKE $${params.length})`);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
     const result = await pool.query(
       `SELECT
          t.id, t.task_name, t.phase, t.project_id,
@@ -47,13 +82,37 @@ exports.getTasks = async function(req, res) {
          u.full_name AS assignee, u.id AS assignee_id,
          TO_CHAR(t.due_date, 'Mon DD, YYYY') AS due_date,
          t.priority, t.status, t.manpower_needed,
-         t.materials_required, t.site_instructions
+         t.materials_required, t.site_instructions,
+         COALESCE(
+           NULLIF(t.progress_pct, 0),
+           (
+             SELECT pl.progress_pct
+             FROM project_progress_logs pl
+             WHERE pl.project_code = p.code
+               AND (pl.phase ILIKE '%' || SPLIT_PART(t.phase, ' - ', 2) || '%' OR pl.phase ILIKE t.phase)
+             ORDER BY pl.created_at DESC
+             LIMIT 1
+           ),
+           CASE WHEN t.status ILIKE 'completed' THEN 100
+                WHEN t.status ILIKE 'in%progress' OR t.status ILIKE 'ongoing' THEN COALESCE(p.progress_pct, 50)
+                ELSE 0 END,
+           0
+         ) AS progress_pct,
+         COALESCE(t.subtasks, '[]'::jsonb) AS subtasks,
+         (
+           SELECT pl.progress_pct
+           FROM project_progress_logs pl
+           WHERE pl.project_code = p.code
+             AND (pl.phase ILIKE '%' || SPLIT_PART(t.phase, ' - ', 2) || '%' OR pl.phase ILIKE t.phase)
+           ORDER BY pl.created_at DESC
+           LIMIT 1
+         ) AS phase_milestone_pct
        FROM tasks t
        LEFT JOIN users u ON u.id = t.assignee_id
        LEFT JOIN projects p ON p.id = t.project_id
-       WHERE ($1::uuid IS NULL OR t.project_id = $1::uuid)
+       ${where}
        ORDER BY t.phase, t.created_at DESC`,
-      [project_id || null]
+      params
     );
     console.log('[ROUTE] GET /tasks → returned', result.rows.length, 'task(s)');
     res.json({ success: true, data: result.rows });
@@ -74,10 +133,36 @@ exports.getTaskById = async function(req, res) {
          u.full_name AS assignee,
          TO_CHAR(t.due_date, 'Mon DD, YYYY') AS due_date,
          t.priority, t.status, t.manpower_needed,
-         t.materials_required, t.site_instructions
+         t.materials_required, t.site_instructions,
+         p.name AS project_name, p.code AS project_code,
+         COALESCE(
+           NULLIF(t.progress_pct, 0),
+           (
+             SELECT pl.progress_pct
+             FROM project_progress_logs pl
+             WHERE pl.project_code = p.code
+               AND (pl.phase ILIKE '%' || SPLIT_PART(t.phase, ' - ', 2) || '%' OR pl.phase ILIKE t.phase)
+             ORDER BY pl.created_at DESC
+             LIMIT 1
+           ),
+           CASE WHEN t.status ILIKE 'completed' THEN 100
+                WHEN t.status ILIKE 'in%progress' OR t.status ILIKE 'ongoing' THEN COALESCE(p.progress_pct, 50)
+                ELSE 0 END,
+           0
+         ) AS progress_pct,
+         COALESCE(t.subtasks, '[]'::jsonb) AS subtasks,
+         (
+           SELECT pl.progress_pct
+           FROM project_progress_logs pl
+           WHERE pl.project_code = p.code
+             AND (pl.phase ILIKE '%' || SPLIT_PART(t.phase, ' - ', 2) || '%' OR pl.phase ILIKE t.phase)
+           ORDER BY pl.created_at DESC
+           LIMIT 1
+         ) AS phase_milestone_pct
        FROM tasks t
        LEFT JOIN users u ON u.id = t.assignee_id
-       WHERE t.id = $1`,
+       LEFT JOIN projects p ON p.id = t.project_id
+       WHERE t.id = $1::uuid`,
       [id]
     );
     if (result.rows.length === 0) {
@@ -94,22 +179,40 @@ exports.getTaskById = async function(req, res) {
 
 // ─── UPDATE TASK STATUS ───────────────────────────────────────────────────────
 exports.updateTaskStatus = async function(req, res) {
-  console.log('[ROUTE] PATCH /tasks/' + req.params.id + '/status → ', req.body.status);
+  const id = req.params.id;
+  const status = req.body.status;
+  let progress_pct = req.body.progress_pct;
+
+  console.log('[ROUTE] PATCH /tasks/' + req.params.id + '/status → ', status);
   try {
-    const id = req.params.id;
-    const status = req.body.status;
-    const allowed = ['Pending', 'In Progress', 'Completed'];
-    if (!allowed.includes(status)) {
-      return res.status(400).json({ error: 'Invalid status value.' });
+    if (progress_pct === undefined && status) {
+      const st = status.toLowerCase();
+      if (st.includes('completed')) {
+        progress_pct = 100;
+      } else if (st.includes('pending')) {
+        progress_pct = 0;
+      } else if (st.includes('in-progress') || st.includes('ongoing') || st.includes('in progress')) {
+        const cur = await pool.query('SELECT progress_pct FROM tasks WHERE id = $1::uuid', [id]);
+        const curVal = cur.rows[0]?.progress_pct || 0;
+        progress_pct = curVal > 0 ? curVal : 50;
+      }
     }
+
     const result = await pool.query(
-      `UPDATE tasks SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
-      [status, id]
+      `UPDATE tasks
+       SET status = COALESCE($1, status),
+           progress_pct = COALESCE($2, progress_pct),
+           updated_at = NOW()
+       WHERE id = $3::uuid
+       RETURNING *`,
+      [status, progress_pct, id]
     );
+
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Task not found.' });
     }
-    console.log('[ROUTE] PATCH /tasks/' + id + '/status → updated to:', status);
+
+    console.log('[ROUTE] PATCH /tasks/' + id + '/status → updated:', result.rows[0].status, 'progress:', result.rows[0].progress_pct + '%');
     res.json({ success: true, data: result.rows[0] });
   } catch (err) {
     console.error('[ROUTE] PATCH /tasks/:id/status ERROR:', err);
@@ -117,35 +220,162 @@ exports.updateTaskStatus = async function(req, res) {
   }
 };
 
+// ─── UPDATE SUBTASKS & PROGRESS ───────────────────────────────────────────────
+exports.updateTaskSubtasks = async function(req, res) {
+  const id = req.params.id;
+  const { subtasks } = req.body;
+  console.log('[ROUTE] PATCH /tasks/' + id + '/subtasks');
+  try {
+    const subs = Array.isArray(subtasks) ? subtasks : [];
+    let pct = 0;
+    if (subs.length > 0) {
+      const doneCount = subs.filter(s => s.completed).length;
+      pct = Math.round((doneCount / subs.length) * 100);
+    }
+    let autoStatus = null;
+    if (pct === 100) autoStatus = 'Completed';
+    else if (pct > 0) autoStatus = 'In Progress';
+
+    const result = await pool.query(
+      `UPDATE tasks
+       SET subtasks = $1,
+           progress_pct = $2,
+           status = COALESCE($3, status),
+           updated_at = NOW()
+       WHERE id = $4::uuid
+       RETURNING *`,
+      [JSON.stringify(subs), pct, autoStatus, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Task not found.' });
+    }
+
+    console.log('[ROUTE] PATCH /tasks/' + id + '/subtasks → new progress:', pct + '%', 'status:', result.rows[0].status);
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    console.error('[ROUTE] PATCH /tasks/:id/subtasks ERROR:', err);
+    res.status(500).json({ error: 'Failed to update subtasks.' });
+  }
+};
+
 // ─── CREATE TASK ──────────────────────────────────────────────────────────────
 exports.createTask = async function(req, res) {
-  console.log('[ROUTE] POST /tasks → creating task:', req.body.taskName);
+  console.log('[ROUTE] POST /tasks → creating task:', req.body.taskName || req.body.task_name);
   try {
-    const taskName = req.body.taskName;
-    const phase = req.body.phase;
-    const assigneeId = req.body.assigneeId;
-    const dueDate = req.body.dueDate;
-    const priority = req.body.priority;
-    const manpowerNeeded = req.body.manpowerNeeded;
-    const materialsRequired = req.body.materialsRequired;
-    const siteInstructions = req.body.siteInstructions;
-    const projectId = req.body.projectId;
+    const taskName          = (req.body.taskName || req.body.task_name || '').trim();
+    const phase             = (req.body.phase || '').trim();
+    let assigneeId          = (req.body.assigneeId || req.body.assignee_id || '').trim();
+    const dueDate           = (req.body.dueDate || req.body.due_date || '').trim();
+    const priority          = (req.body.priority || '').trim();
+    const manpowerNeeded    = (req.body.manpowerNeeded || req.body.manpower_needed || '').trim();
+    const materialsRequired = (req.body.materialsRequired || req.body.materials_required || '').trim();
+    const siteInstructions  = (req.body.siteInstructions || req.body.site_instructions || '').trim();
+    let projectId           = (req.body.projectId || req.body.project_id || '').trim();
+
+    // Check all fields are provided
+    if (!taskName) {
+      return res.status(400).json({ error: 'Task name is required.' });
+    }
+    if (!phase) {
+      return res.status(400).json({ error: 'Phase is required.' });
+    }
+    if (!projectId) {
+      return res.status(400).json({ error: 'Project is required.' });
+    }
+    if (!assigneeId) {
+      return res.status(400).json({ error: 'Assignee engineer is required.' });
+    }
+    if (!dueDate) {
+      return res.status(400).json({ error: 'Due date is required.' });
+    }
+    if (!priority) {
+      return res.status(400).json({ error: 'Priority is required.' });
+    }
+    if (!manpowerNeeded) {
+      return res.status(400).json({ error: 'Manpower needed is required.' });
+    }
+    if (!materialsRequired) {
+      return res.status(400).json({ error: 'Materials required is required.' });
+    }
+    if (!siteInstructions) {
+      return res.status(400).json({ error: 'Site instructions are required.' });
+    }
+
+    // Resolve projectId if passed as project code or UUID
+    let resolvedProjectId = null;
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId);
+    if (isUuid) {
+      resolvedProjectId = projectId;
+    } else {
+      const pRes = await pool.query('SELECT id FROM projects WHERE code = $1 OR name ILIKE $1 LIMIT 1', [projectId]);
+      if (pRes.rows.length > 0) resolvedProjectId = pRes.rows[0].id;
+      else return res.status(400).json({ error: 'Selected project was not found.' });
+    }
+
+    // Resolve assigneeId if passed as user name or email
+    let resolvedAssigneeId = null;
+    const isUserUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(assigneeId);
+    if (isUserUuid) {
+      resolvedAssigneeId = assigneeId;
+    } else {
+      const uRes = await pool.query('SELECT id FROM users WHERE full_name ILIKE $1 OR email ILIKE $1 LIMIT 1', [assigneeId]);
+      if (uRes.rows.length > 0) resolvedAssigneeId = uRes.rows[0].id;
+      else return res.status(400).json({ error: 'Selected assignee engineer was not found.' });
+    }
 
     const result = await pool.query(
       `INSERT INTO tasks
          (task_name, phase, assignee_id, due_date, priority,
           manpower_needed, materials_required, site_instructions,
           project_id, status)
-       VALUES ($1, $2, $3::uuid, $4, $5, $6, $7, $8, $9, 'Pending')
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'Pending')
        RETURNING *`,
-      [taskName, phase, assigneeId, dueDate, priority,
-       manpowerNeeded, materialsRequired, siteInstructions, projectId || null]
+      [taskName, phase, resolvedAssigneeId, dueDate, priority,
+       manpowerNeeded, materialsRequired, siteInstructions, resolvedProjectId]
     );
     console.log('[ROUTE] POST /tasks → created task id:', result.rows[0].id);
     res.status(201).json({ success: true, data: result.rows[0] });
   } catch (err) {
     console.error('[ROUTE] POST /tasks ERROR:', err);
     res.status(500).json({ error: 'Failed to create task.' });
+  }
+};
+
+// ─── ASSIGN TASK ──────────────────────────────────────────────────────────────
+exports.assignTask = async function(req, res) {
+  const id = req.params.id;
+  const { assigneeId } = req.body;
+  console.log('[ROUTE] PATCH /tasks/' + id + '/assign → assigneeId:', assigneeId);
+
+  if (!assigneeId) {
+    return res.status(400).json({ error: 'assigneeId is required.' });
+  }
+
+  try {
+    // Verify user exists
+    const userResult = await pool.query(
+      'SELECT id, full_name FROM users WHERE id = $1 AND is_active = TRUE',
+      [assigneeId]
+    );
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+
+    const result = await pool.query(
+      `UPDATE tasks SET assignee_id = $1, updated_at = NOW() WHERE id = $2
+       RETURNING *`,
+      [assigneeId, id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Task not found.' });
+    }
+
+    console.log('[ROUTE] PATCH /tasks/' + id + '/assign → assigned to:', userResult.rows[0].full_name);
+    res.json({ success: true, data: result.rows[0] });
+  } catch (err) {
+    console.error('[ROUTE] PATCH /tasks/:id/assign ERROR:', err);
+    res.status(500).json({ error: 'Failed to assign task.' });
   }
 };
 
@@ -359,7 +589,8 @@ exports.generateReportNow = async function(req, res) {
       images: imagePaths.length
     });
 
-    _callAIAndSave({ task: task, taskId: taskId, date: date, imagePaths: imagePaths });
+    // Run AI in background using the shared aiService (no more duplicated code)
+    _processReportInBackground({ task, taskId, date, imagePaths });
 
   } catch (err) {
     console.error('[ROUTE] POST generate-report ERROR:', err);
@@ -367,82 +598,26 @@ exports.generateReportNow = async function(req, res) {
   }
 };
 
-// ─── INTERNAL: Call Python AI service and save result ────────────────────────
-function _callAIAndSave(opts) {
-  var task      = opts.task;
-  var taskId    = opts.taskId;
-  var date      = opts.date;
-  var imagePaths = opts.imagePaths;
+// ─── INTERNAL: Background AI processing (uses shared aiService) ──────────────
+const { generateAIReport } = require('../services/aiService');
 
-  console.log('════════════════════════════════════════');
-  console.log('[AI] _callAIAndSave started');
-  console.log('  task_id   :', taskId);
-  console.log('  task_name :', task.task_name);
-  console.log('  date      :', date);
-  console.log('  paths     :', imagePaths.length, 'image(s) to load from disk');
+async function _processReportInBackground({ task, taskId, date, imagePaths }) {
+  try {
+    console.log('[AI] Background report generation started for task:', task.task_name);
 
-  // Convert images to base64
-  var base64Images = [];
-  for (var i = 0; i < imagePaths.length; i++) {
-    var imgPath = imagePaths[i];
-    if (fs.existsSync(imgPath)) {
-      var buffer = fs.readFileSync(imgPath);
-      base64Images.push(buffer.toString('base64'));
-      console.log('  [' + i + '] ✅ Loaded:', path.basename(imgPath), '(' + Math.round(buffer.length / 1024) + ' KB)');
-    } else {
-      console.warn('  [' + i + '] ❌ NOT FOUND on disk:', imgPath);
-    }
-  }
+    const { report, observations } = await generateAIReport({
+      task:       { task_name: task.task_name, project_name: task.project_name, assignee: task.assignee },
+      taskId,
+      date,
+      imagePaths,
+    });
 
-  if (base64Images.length === 0) {
-    console.error('[AI] ❌ No valid images found on disk — aborting AI call.');
-    console.error('[AI] Check that the upload paths in DB match actual disk paths.');
-    return;
-  }
-
-  console.log('[AI] Sending', base64Images.length, 'image(s) to Python →', AI_SERVICE_URL + '/generate-report');
-  console.log('════════════════════════════════════════');
-
-  var payload = JSON.stringify({
-    task_id:     taskId,
-    task_name:   task.task_name,
-    location:    task.project_name || 'N/A',
-    assigned_to: task.assignee     || 'N/A',
-    date:        date,
-    images:      base64Images,
-  });
-
-  fetch(AI_SERVICE_URL + '/generate-report', {
-    method:  'POST',
-    body:    payload,
-    headers: { 'Content-Type': 'application/json' },
-    signal:  AbortSignal.timeout(600000) // 10 min timeout for CPU
-  })
-  .then(function(response) {
-    console.log('[AI] Python responded with HTTP', response.status);
-    if (!response.ok) {
-      return response.text().then(function(txt) {
-        throw new Error('AI service HTTP ' + response.status + ': ' + txt);
-      });
-    }
-    return response.json();
-  })
-  .then(function(result) {
-    console.log('════════════════════════════════════════');
-    console.log('[AI] ✅ Python response received:');
-    console.log('  images_analyzed :', result.images_analyzed);
-    console.log('  report length   :', result.report ? result.report.length : 0, 'chars');
-    console.log('  observations    :', JSON.stringify(
-      (result.observations || []).map(function(o) {
-        return { work_progress: (o.work_progress || '').substring(0, 60) };
-      })
-    ));
-
-    if (!result.report || result.report.trim().length === 0) {
-      throw new Error('Python returned empty report text');
+    if (!report || report.trim().length === 0) {
+      throw new Error('AI returned empty report text');
     }
 
-    return pool.query(
+    // Save report to DB
+    await pool.query(
       `INSERT INTO reports (task_id, report_date, observations, report_text, status)
        VALUES ($1, $2, $3::jsonb, $4, 'completed')
        ON CONFLICT (task_id, report_date)
@@ -450,25 +625,21 @@ function _callAIAndSave(opts) {
          observations = $3::jsonb,
          report_text  = $4,
          status       = 'completed'`,
-      [taskId, date, JSON.stringify(result.observations), result.report]
-    ).then(function() {
-      return pool.query(
-        'UPDATE task_images SET status = $1 WHERE task_id = $2 AND upload_date = $3',
-        ['processed', taskId, date]
-      );
-    }).then(function() {
-      console.log('[AI] ✅ Report saved to DB — task:', task.task_name, '| date:', date);
-      console.log('════════════════════════════════════════');
-    });
-  })
-  .catch(function(err) {
-    console.error('════════════════════════════════════════');
-    console.error('[AI] ❌ Report generation FAILED for task:', taskId);
-    console.error('[AI] Error:', err.message);
-    console.error('════════════════════════════════════════');
-    pool.query(
+      [taskId, date, JSON.stringify(observations), report]
+    );
+
+    // Mark images as processed
+    await pool.query(
+      'UPDATE task_images SET status = $1 WHERE task_id = $2 AND upload_date = $3',
+      ['processed', taskId, date]
+    );
+
+    console.log('[AI] ✅ Report saved to DB — task:', task.task_name, '| date:', date);
+  } catch (err) {
+    console.error('[AI] ❌ Report generation FAILED for task:', taskId, '—', err.message);
+    await pool.query(
       'UPDATE task_images SET status = $1 WHERE task_id = $2 AND upload_date = $3',
       ['failed', taskId, date]
-    ).catch(function(e) { console.error('[AI] Failed to update image status:', e); });
-  });
+    ).catch(e => console.error('[AI] Failed to update image status:', e));
+  }
 }
