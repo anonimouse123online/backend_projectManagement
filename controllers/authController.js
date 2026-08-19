@@ -116,7 +116,7 @@ exports.getMe = async (req, res) => {
     if (!userId) return res.status(401).json({ error: 'Unauthorized.' });
 
     const result = await pool.query(
-      'SELECT id, full_name, email, role, phone, company, preferences, created_at FROM users WHERE id = $1 AND is_active = TRUE',
+      'SELECT id, full_name, email, phone, company, preferences, created_at FROM users WHERE id = $1 AND is_active = TRUE',
       [userId]
     );
 

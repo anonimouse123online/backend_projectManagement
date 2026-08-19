@@ -1,4 +1,4 @@
-// controllers/dashboardController.js
+  // controllers/dashboardController.js
 const pool = require('../db');
 
 // ─── STATS (Live Dynamic Aggregation) ──────────────────────

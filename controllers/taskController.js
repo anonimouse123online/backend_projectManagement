@@ -36,89 +36,185 @@ exports.upload = multer({
 });
 
 // ─── GET ALL TASKS ────────────────────────────────────────────────────────────
+// ─── GET ALL TASKS ────────────────────────────────────────────────────────────
 exports.getTasks = async function(req, res) {
-  const { project_id, status, phase, priority, assignee_id, search } = req.query;
-  console.log('[ROUTE] GET /tasks filters:', { project_id, status, phase, priority, assignee_id, search });
+  const {
+    project_id,
+    status,
+    phase,
+    priority,
+    assignee_id,
+    search
+  } = req.query;
+
+  console.log('[ROUTE] GET /tasks filters:', {
+    project_id,
+    status,
+    phase,
+    priority,
+    assignee_id,
+    search
+  });
+
   try {
     const conditions = [];
     const params = [];
 
+    // PROJECT FILTER
     if (project_id) {
       params.push(project_id);
-      conditions.push(`(t.project_id::text = $${params.length} OR p.code = $${params.length})`);
+
+      conditions.push(
+        `(t.project_id::text = $${params.length}
+          OR p.code = $${params.length})`
+      );
     }
 
-    if (status && status !== 'All' && status !== 'All Statuses') {
+    // STATUS FILTER
+    if (
+      status &&
+      status !== 'All' &&
+      status !== 'All Statuses'
+    ) {
       params.push(`%${status.replace('-', '%')}%`);
-      conditions.push(`t.status ILIKE $${params.length}`);
+
+      conditions.push(
+        `t.status ILIKE $${params.length}`
+      );
     }
 
-    if (phase && phase !== 'All') {
+    // PHASE FILTER
+    if (
+      phase &&
+      phase !== 'All'
+    ) {
       params.push(`%${phase}%`);
-      conditions.push(`t.phase ILIKE $${params.length}`);
+
+      conditions.push(
+        `t.phase ILIKE $${params.length}`
+      );
     }
 
-    if (priority && priority !== 'All') {
+    // PRIORITY FILTER
+    if (
+      priority &&
+      priority !== 'All'
+    ) {
       params.push(priority);
-      conditions.push(`t.priority ILIKE $${params.length}`);
+
+      conditions.push(
+        `t.priority ILIKE $${params.length}`
+      );
     }
 
+    // ASSIGNEE FILTER
     if (assignee_id) {
       params.push(assignee_id);
-      conditions.push(`(t.assignee_id::text = $${params.length} OR u.full_name ILIKE $${params.length})`);
+
+      conditions.push(
+        `(t.assignee_id::text = $${params.length}
+          OR u.full_name ILIKE $${params.length})`
+      );
     }
 
+    // SEARCH
     if (search) {
       params.push(`%${search}%`);
-      conditions.push(`(t.task_name ILIKE $${params.length} OR t.site_instructions ILIKE $${params.length} OR p.name ILIKE $${params.length} OR p.code ILIKE $${params.length})`);
+
+      conditions.push(
+        `(t.task_name ILIKE $${params.length}
+          OR t.site_instructions ILIKE $${params.length}
+          OR p.name ILIKE $${params.length}
+          OR p.code ILIKE $${params.length})`
+      );
     }
 
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const where = conditions.length
+      ? `WHERE ${conditions.join(' AND ')}`
+      : '';
+
+    const query = `
+      SELECT
+        t.id,
+        t.task_name,
+        t.phase,
+        t.project_id,
+
+        p.name AS project_name,
+        p.code AS project_code,
+
+        u.full_name AS assignee,
+        u.id AS assignee_id,
+
+        TO_CHAR(
+          t.due_date,
+          'Mon DD, YYYY'
+        ) AS due_date,
+
+        t.priority,
+        t.status,
+        t.manpower_needed,
+        t.materials_required,
+        t.site_instructions,
+
+        '[]'::jsonb AS subtasks,
+
+        CASE
+          WHEN t.status ILIKE 'completed'
+            THEN 100
+
+          WHEN t.status ILIKE 'in progress'
+            OR t.status ILIKE 'in-progress'
+            OR t.status ILIKE 'ongoing'
+            THEN 50
+
+          ELSE 0
+        END AS progress_pct
+
+      FROM tasks t
+
+      LEFT JOIN users u
+        ON u.id = t.assignee_id
+
+      LEFT JOIN projects p
+        ON p.id = t.project_id
+
+      ${where}
+
+      ORDER BY
+        t.phase,
+        t.created_at DESC
+    `;
+
+    console.log('[ROUTE] Executing GET /tasks query...');
 
     const result = await pool.query(
-      `SELECT
-         t.id, t.task_name, t.phase, t.project_id,
-         p.name AS project_name, p.code AS project_code,
-         u.full_name AS assignee, u.id AS assignee_id,
-         TO_CHAR(t.due_date, 'Mon DD, YYYY') AS due_date,
-         t.priority, t.status, t.manpower_needed,
-         t.materials_required, t.site_instructions,
-         COALESCE(
-           NULLIF(t.progress_pct, 0),
-           (
-             SELECT pl.progress_pct
-             FROM project_progress_logs pl
-             WHERE pl.project_code = p.code
-               AND (pl.phase ILIKE '%' || SPLIT_PART(t.phase, ' - ', 2) || '%' OR pl.phase ILIKE t.phase)
-             ORDER BY pl.created_at DESC
-             LIMIT 1
-           ),
-           CASE WHEN t.status ILIKE 'completed' THEN 100
-                WHEN t.status ILIKE 'in%progress' OR t.status ILIKE 'ongoing' THEN COALESCE(p.progress_pct, 50)
-                ELSE 0 END,
-           0
-         ) AS progress_pct,
-         COALESCE(t.subtasks, '[]'::jsonb) AS subtasks,
-         (
-           SELECT pl.progress_pct
-           FROM project_progress_logs pl
-           WHERE pl.project_code = p.code
-             AND (pl.phase ILIKE '%' || SPLIT_PART(t.phase, ' - ', 2) || '%' OR pl.phase ILIKE t.phase)
-           ORDER BY pl.created_at DESC
-           LIMIT 1
-         ) AS phase_milestone_pct
-       FROM tasks t
-       LEFT JOIN users u ON u.id = t.assignee_id
-       LEFT JOIN projects p ON p.id = t.project_id
-       ${where}
-       ORDER BY t.phase, t.created_at DESC`,
+      query,
       params
     );
-    console.log('[ROUTE] GET /tasks → returned', result.rows.length, 'task(s)');
-    res.json({ success: true, data: result.rows });
+
+    console.log(
+      '[ROUTE] GET /tasks → returned',
+      result.rows.length,
+      'task(s)'
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: result.rows
+    });
+
   } catch (err) {
-    console.error('[ROUTE] GET /tasks ERROR:', err);
-    res.status(500).json({ error: 'Failed to fetch tasks.' });
+    console.error(
+      '[ROUTE] GET /tasks ERROR:',
+      err
+    );
+
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch tasks.',
+      details: err.message
+    });
   }
 };
 
@@ -150,7 +246,7 @@ exports.getTaskById = async function(req, res) {
                 ELSE 0 END,
            0
          ) AS progress_pct,
-         COALESCE(t.subtasks, '[]'::jsonb) AS subtasks,
+       '[]'::jsonb AS subtasks,
          (
            SELECT pl.progress_pct
            FROM project_progress_logs pl

@@ -121,47 +121,123 @@ const generateProjectCode = async (req, res) => {
 // POST /projects/join
 const joinProject = async (req, res) => {
   const { invite_code } = req.body;
-  const userId = req.user?.id;
 
-  if (!userId) return res.status(401).json({ message: 'Authentication required.' });
+  const userId = req.user?.id;
+  const userEmail = req.user?.email;
+
+  if (!userId || !userEmail) {
+    return res.status(401).json({
+      message: 'Authentication required.'
+    });
+  }
 
   try {
+
+    // ============================================================
+    // CHECK INVITE CODE
+    // ============================================================
+
     const { rows } = await pool.query(
-      `SELECT * FROM project_invite_codes
-       WHERE code = $1 AND used = FALSE AND expires_at > NOW()`,
+      `
+      SELECT *
+      FROM project_invite_codes
+      WHERE code = $1
+        AND used = FALSE
+        AND expires_at > NOW()
+      `,
       [invite_code]
     );
 
-    if (rows.length === 0)
-      return res.status(400).json({ message: 'Invalid or expired invite code.' });
+    if (rows.length === 0) {
+      return res.status(400).json({
+        message: 'Invalid or expired invite code.'
+      });
+    }
 
     const invite = rows[0];
 
+
+    // ============================================================
+    // CHECK IF USER ALREADY JOINED
+    // project_members uses user_name instead of user_id
+    // ============================================================
+
     const already = await pool.query(
-      `SELECT id FROM project_members WHERE project_id = $1 AND user_id = $2`,
-      [invite.project_id, userId]
+      `
+      SELECT id
+      FROM project_members
+      WHERE project_id = $1
+        AND user_name = $2
+      `,
+      [
+        invite.project_id,
+        userEmail
+      ]
     );
-    if (already.rows.length > 0)
-      return res.status(409).json({ message: 'You are already a member of this project.' });
+
+    if (already.rows.length > 0) {
+      return res.status(409).json({
+        message: 'You are already a member of this project.'
+      });
+    }
+
+
+    // ============================================================
+    // ADD USER TO PROJECT
+    // ============================================================
 
     await pool.query(
-      `INSERT INTO project_members (project_id, user_id, role)
-       VALUES ($1, $2, 'Member')`,
-      [invite.project_id, userId]
+      `
+      INSERT INTO project_members (
+        project_id,
+        user_name,
+        role
+      )
+      VALUES ($1, $2, 'Member')
+      `,
+      [
+        invite.project_id,
+        userEmail
+      ]
     );
 
+
+    // ============================================================
+    // MARK INVITE CODE AS USED
+    // ============================================================
+
     await pool.query(
-      `UPDATE project_invite_codes SET used = TRUE, used_at = NOW() WHERE id = $1`,
+      `
+      UPDATE project_invite_codes
+      SET used = TRUE,
+          used_at = NOW()
+      WHERE id = $1
+      `,
       [invite.id]
     );
 
-    res.json({
+
+    // ============================================================
+    // SUCCESS
+    // ============================================================
+
+    return res.json({
       success: true,
       message: 'Successfully joined the project.',
-      project_id: invite.project_id,
+      project_id: invite.project_id
     });
+
   } catch (err) {
-    res.status(500).json({ message: 'Failed to join project', error: err.message });
+
+    console.error(
+      'joinProject error:',
+      err
+    );
+
+    return res.status(500).json({
+      message: 'Failed to join project',
+      error: err.message
+    });
   }
 };
 
@@ -189,22 +265,103 @@ const getActiveCode = async (req, res) => {
 };
 
 // GET /projects/joined
+// ============================================================
+// GET PROJECTS JOINED BY CURRENT USER
+// GET /projects/joined
+// ============================================================
+
 const getJoinedProjects = async (req, res) => {
-  const userId = req.user?.id;
-  if (!userId) return res.status(401).json({ message: 'Authentication required.' });
+
+  const userEmail = req.user?.email;
+
+  if (!userEmail) {
+    return res.status(401).json({
+      success: false,
+      message: 'Authentication required.'
+    });
+  }
 
   try {
+
+    console.log('======================================');
+    console.log('[JOINED PROJECTS]');
+    console.log('USER EMAIL:', userEmail);
+    console.log('======================================');
+
+
     const { rows } = await pool.query(
-      `SELECT p.code, p.name, p.status, p.phase
-       FROM project_members pm
-       JOIN projects p ON p.code = pm.project_id
-       WHERE pm.user_id = $1
-       ORDER BY pm.joined_at DESC`,
-      [userId]
+      `
+      SELECT
+        p.id,
+        p.code,
+        p.name,
+        p.location,
+        p.scope,
+        p.client,
+        p.budget,
+        p.phase,
+        p.status,
+
+        0 AS progress,
+
+        TO_CHAR(
+          p.start_date,
+          'YYYY-MM-DD'
+        ) AS start_date,
+
+        TO_CHAR(
+          p.end_date,
+          'YYYY-MM-DD'
+        ) AS due_date,
+
+        'Not assigned' AS manager
+
+      FROM project_members pm
+
+      INNER JOIN projects p
+        ON p.code = pm.project_id
+
+      WHERE LOWER(TRIM(pm.user_name))
+            =
+            LOWER(TRIM($1))
+
+      ORDER BY pm.joined_at DESC
+      `,
+      [
+        userEmail
+      ]
     );
-    res.json({ success: true, data: rows });
+
+
+    console.log(
+      `[JOINED PROJECTS] FOUND ${rows.length} PROJECT(S)`
+    );
+
+    console.log(
+      '[JOINED PROJECTS] DATA:',
+      rows
+    );
+
+
+    return res.status(200).json({
+      success: true,
+      data: rows
+    });
+
+
   } catch (err) {
-    res.status(500).json({ message: 'Failed to fetch joined projects', error: err.message });
+
+    console.error(
+      '❌ getJoinedProjects error:',
+      err
+    );
+
+
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch joined projects.',
+      error: err.message
+    });
   }
 };
 
