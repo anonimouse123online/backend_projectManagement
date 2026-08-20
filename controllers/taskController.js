@@ -136,7 +136,7 @@ exports.getTasks = async function(req, res) {
     const query = `
       SELECT
         t.id,
-        t.task_name,
+        COALESCE(t.task_name, t.title, 'Untitled Task') AS task_name,
         t.phase,
         t.project_id,
 
@@ -147,7 +147,7 @@ exports.getTasks = async function(req, res) {
         u.id AS assignee_id,
 
         TO_CHAR(
-          t.due_date,
+          t.due_date::date,
           'Mon DD, YYYY'
         ) AS due_date,
 
@@ -177,7 +177,7 @@ exports.getTasks = async function(req, res) {
         ON u.id = t.assignee_id
 
       LEFT JOIN projects p
-        ON p.id = t.project_id
+        ON p.id::text = t.project_id::text OR p.code = t.project_id::text
 
       ${where}
 
@@ -225,9 +225,11 @@ exports.getTaskById = async function(req, res) {
     const id = req.params.id;
     const result = await pool.query(
       `SELECT
-         t.id, t.task_name, t.phase,
+         t.id,
+         COALESCE(t.task_name, t.title, 'Untitled Task') AS task_name,
+         t.phase,
          u.full_name AS assignee,
-         TO_CHAR(t.due_date, 'Mon DD, YYYY') AS due_date,
+         TO_CHAR(t.due_date::date, 'Mon DD, YYYY') AS due_date,
          t.priority, t.status, t.manpower_needed,
          t.materials_required, t.site_instructions,
          p.name AS project_name, p.code AS project_code,
@@ -257,8 +259,8 @@ exports.getTaskById = async function(req, res) {
          ) AS phase_milestone_pct
        FROM tasks t
        LEFT JOIN users u ON u.id = t.assignee_id
-       LEFT JOIN projects p ON p.id = t.project_id
-       WHERE t.id = $1::uuid`,
+       LEFT JOIN projects p ON p.id::text = t.project_id::text OR p.code = t.project_id::text
+       WHERE t.id::text = $1::text`,
       [id]
     );
     if (result.rows.length === 0) {
@@ -422,12 +424,12 @@ exports.createTask = async function(req, res) {
 
     const result = await pool.query(
       `INSERT INTO tasks
-         (task_name, phase, assignee_id, due_date, priority,
+         (title, task_name, description, phase, assignee_id, due_date, priority,
           manpower_needed, materials_required, site_instructions,
           project_id, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'Pending')
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'Pending')
        RETURNING *`,
-      [taskName, phase, resolvedAssigneeId, dueDate, priority,
+      [taskName, taskName, siteInstructions, phase, resolvedAssigneeId, dueDate, priority,
        manpowerNeeded, materialsRequired, siteInstructions, resolvedProjectId]
     );
     console.log('[ROUTE] POST /tasks → created task id:', result.rows[0].id);

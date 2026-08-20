@@ -16,7 +16,7 @@ const softwareService = {
     const result = await pool.query(
       `SELECT s.*, p.name AS project_name
        FROM software s
-       LEFT JOIN projects p ON s.project_id = p.id
+       LEFT JOIN projects p ON s.project_id::text = p.id::text OR s.project_id = p.code
        ORDER BY s.created_at DESC`
     );
     return result.rows;
@@ -27,7 +27,7 @@ const softwareService = {
     const result = await pool.query(
       `SELECT s.*, p.name AS project_name
        FROM software s
-       LEFT JOIN projects p ON s.project_id = p.id
+       LEFT JOIN projects p ON s.project_id::text = p.id::text OR s.project_id = p.code
        WHERE s.id = $1`,
       [id]
     );

@@ -74,7 +74,7 @@ exports.updateResource = async (req, res) => {
       `UPDATE resources
        SET name=$1, supplier=$2, category=$3, quantity=$4, unit=$5,
            min_threshold=$6, unit_price=$7, project=$8, updated_at=NOW()
-       WHERE id=$9
+       WHERE id::text = $9::text
        RETURNING
          id, name, supplier, category,
          quantity, unit, min_threshold AS "minThreshold",
@@ -93,7 +93,7 @@ exports.updateResource = async (req, res) => {
 exports.deleteResource = async (req, res) => {
   try {
     const { id } = req.params;
-    const { rowCount } = await pool.query('DELETE FROM resources WHERE id=$1', [id]);
+    const { rowCount } = await pool.query('DELETE FROM resources WHERE id::text = $1::text', [id]);
     if (!rowCount) return res.status(404).json({ error: 'Resource not found.' });
     res.json({ success: true });
   } catch (err) {

@@ -65,13 +65,13 @@ const createProject = async (req, res) => {
 
     const { rows } = await pool.query(
       `INSERT INTO projects
-        (code, name, location, scope, client, budget, start_date, end_date, phase, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'Planning')
+        (code, project_code, name, location, scope, client, budget, start_date, end_date, phase, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'Planning')
        RETURNING
          id, code, name, location, scope, client, budget, phase, status,
          TO_CHAR(start_date, 'YYYY-MM-DD') AS start_date,
          TO_CHAR(end_date,   'YYYY-MM-DD') AS end_date`,
-      [code, name, location, scope, client, budget, start_date, end_date, phase]
+      [code, code, name, location, scope, client, budget, start_date, end_date, phase]
     );
 
     res.status(201).json({ success: true, data: rows[0] });

@@ -16,15 +16,32 @@ exports.signup = async (req, res) => {
     const { name, email, password, role } = req.body;
     console.log('Signup payload received:', { name, email, role });
 
-    if (!email || !password || !role) {
-      return res.status(400).json({ error: 'Email, password, and role are required.' });
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required.' });
+    }
+
+    // Default role to Admin if not specified
+    let assignedRole = 'Admin';
+    if (role) {
+      const lower = role.toLowerCase().trim();
+      if (lower === 'site engineer' || lower === 'engineer') {
+        assignedRole = 'Site Engineer';
+      } else if (lower === 'project manager') {
+        assignedRole = 'Project Manager';
+      } else if (lower === 'supervisor') {
+        assignedRole = 'Supervisor';
+      } else if (lower === 'admin') {
+        assignedRole = 'Admin';
+      } else {
+        assignedRole = role.trim();
+      }
     }
 
     // Use name if provided, otherwise derive from email
     const fullName = name?.trim() || email.split('@')[0];
 
     const existing = await pool.query(
-      'SELECT id FROM users WHERE email = $1', [email]
+      'SELECT id FROM users WHERE email = $1', [email.trim().toLowerCase()]
     );
     if (existing.rows.length > 0) {
       return res.status(409).json({ error: 'Email already registered.' });
@@ -34,10 +51,10 @@ exports.signup = async (req, res) => {
     const password_hash = await bcrypt.hash(password, SALT_ROUNDS);
 
     const result = await pool.query(
-      `INSERT INTO users (full_name, email, password_hash, role)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO users (name, full_name, email, password_hash, role)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING id, full_name, email, role, created_at`,
-      [fullName, email.trim().toLowerCase(), password_hash, role]
+      [fullName, fullName, email.trim().toLowerCase(), password_hash, assignedRole]
     );
 
     const user = result.rows[0];
