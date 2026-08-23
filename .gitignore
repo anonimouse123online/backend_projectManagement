@@ -5,3 +5,12 @@ ai_service/moondream2/
 *.pt
 *.safetensors
 __pycache__/
+
+# Firebase credentials
+configuration/firebase-service-account.json.json
+config/firebase-service-account.json
+firebase-service-account.json
+firebase-service-account.json.enc
+firebase-service-account.json.enc.key
+
+firenaseAdmin.ksc

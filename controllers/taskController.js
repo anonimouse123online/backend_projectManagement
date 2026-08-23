@@ -318,6 +318,191 @@ exports.updateTaskStatus = async function(req, res) {
   }
 };
 
+// ============================================================
+// COMPLETE TASK
+// PATCH /tasks/:id/complete
+// ============================================================
+
+// ============================================================
+// COMPLETE TASK
+// PATCH /tasks/:id/complete
+// ============================================================
+
+exports.completeTask = async function(req, res) {
+
+  const taskId =
+    req.params.id || req.params.taskId;
+
+  console.log(
+    '════════════════════════════════════════'
+  );
+
+  console.log(
+    '[COMPLETE TASK] TASK ID:',
+    taskId
+  );
+
+  try {
+
+    // --------------------------------------------------------
+    // FIND TASK
+    // --------------------------------------------------------
+
+    const taskResult =
+      await pool.query(
+        `
+        SELECT
+          t.id,
+          t.task_name,
+          t.status,
+          t.project_id,
+
+          p.code AS project_code,
+          p.name AS project_name
+
+        FROM tasks t
+
+        LEFT JOIN projects p
+          ON p.id = t.project_id
+
+        WHERE t.id = $1::uuid
+
+        LIMIT 1
+        `,
+        [taskId]
+      );
+
+
+    if (taskResult.rows.length === 0) {
+
+      return res.status(404).json({
+        success: false,
+        message: 'Task not found.'
+      });
+    }
+
+
+    const task =
+      taskResult.rows[0];
+
+
+    console.log(
+      '[COMPLETE TASK] TASK:',
+      task.task_name
+    );
+
+    console.log(
+      '[COMPLETE TASK] PROJECT:',
+      task.project_code || 'N/A'
+    );
+
+
+    // --------------------------------------------------------
+    // UPDATE TASK
+    // --------------------------------------------------------
+
+    const result =
+      await pool.query(
+        `
+        UPDATE tasks
+
+        SET
+          status = 'Completed',
+          updated_at = NOW()
+
+        WHERE id = $1::uuid
+
+        RETURNING
+          id,
+          task_name,
+          project_id,
+          status,
+          updated_at
+        `,
+        [taskId]
+      );
+
+
+    const completedTask =
+      result.rows[0];
+
+
+    console.log(
+      '✅ TASK COMPLETED'
+    );
+
+    console.log(
+      'TASK:',
+      completedTask.task_name
+    );
+
+    console.log(
+      'STATUS:',
+      completedTask.status
+    );
+
+    console.log(
+      '════════════════════════════════════════'
+    );
+
+
+    return res.status(200).json({
+
+      success: true,
+
+      message:
+        'Task marked as completed successfully.',
+
+      data: {
+        ...completedTask,
+
+        // Android can still receive 100%
+        progress_pct: 100
+      }
+
+    });
+
+
+  } catch (err) {
+
+    console.error(
+      '════════════════════════════════════════'
+    );
+
+    console.error(
+      '❌ COMPLETE TASK ERROR'
+    );
+
+    console.error(
+      'MESSAGE:',
+      err.message
+    );
+
+    console.error(
+      'CODE:',
+      err.code
+    );
+
+    console.error(err);
+
+    console.error(
+      '════════════════════════════════════════'
+    );
+
+
+    return res.status(500).json({
+
+      success: false,
+
+      message:
+        'Failed to complete task.',
+
+      error:
+        err.message
+
+    });
+  }
+};
 // ─── UPDATE SUBTASKS & PROGRESS ───────────────────────────────────────────────
 exports.updateTaskSubtasks = async function(req, res) {
   const id = req.params.id;
@@ -741,3 +926,289 @@ async function _processReportInBackground({ task, taskId, date, imagePaths }) {
     ).catch(e => console.error('[AI] Failed to update image status:', e));
   }
 }
+// ============================================================
+// UPLOAD ENGINEER REPORT TO ADMIN
+// POST /tasks/:id/reports
+// ============================================================
+
+exports.uploadTaskReport = async function(req, res) {
+
+  const taskId =
+    req.params.id || req.params.taskId;
+
+  const {
+    title,
+    report_text,
+    report_type
+  } = req.body;
+
+  console.log('════════════════════════════════════════');
+  console.log('[UPLOAD ENGINEER REPORT]');
+  console.log('TASK ID:', taskId);
+  console.log('USER:', req.user?.email || 'Unknown');
+  console.log('TITLE:', title);
+  console.log('REPORT TYPE:', report_type);
+  console.log(
+    'REPORT LENGTH:',
+    report_text?.length || 0
+  );
+  console.log('════════════════════════════════════════');
+
+  try {
+
+    // --------------------------------------------------------
+    // VALIDATION
+    // --------------------------------------------------------
+
+    if (!taskId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Task ID is required.'
+      });
+    }
+
+    if (!report_text || !report_text.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Report text is required.'
+      });
+    }
+
+
+    // --------------------------------------------------------
+    // FIND TASK + PROJECT
+    // --------------------------------------------------------
+
+    const taskResult = await pool.query(
+      `
+      SELECT
+        t.id,
+        t.task_name,
+        t.project_id,
+        t.assignee_id,
+
+        p.code AS project_code,
+        p.name AS project_name,
+
+        u.full_name AS engineer_name,
+        u.email AS engineer_email
+
+      FROM tasks t
+
+      LEFT JOIN projects p
+        ON p.id = t.project_id
+
+      LEFT JOIN users u
+        ON u.id = t.assignee_id
+
+      WHERE t.id = $1::uuid
+
+      LIMIT 1
+      `,
+      [taskId]
+    );
+
+
+    if (taskResult.rows.length === 0) {
+
+      console.log(
+        '[UPLOAD ENGINEER REPORT] Task not found.'
+      );
+
+      return res.status(404).json({
+        success: false,
+        message: 'Task not found.'
+      });
+    }
+
+
+    const task =
+      taskResult.rows[0];
+
+
+    if (!task.project_code) {
+
+      return res.status(400).json({
+        success: false,
+        message:
+          'The task is not connected to a project.'
+      });
+    }
+
+
+    console.log(
+      '[UPLOAD ENGINEER REPORT] PROJECT:',
+      task.project_code
+    );
+
+    console.log(
+      '[UPLOAD ENGINEER REPORT] TASK:',
+      task.task_name
+    );
+
+
+    // --------------------------------------------------------
+    // WHO SUBMITTED THE REPORT?
+    // --------------------------------------------------------
+
+    // Prefer authenticated mobile user.
+    // Fall back to task assignee.
+    const preparedBy =
+      req.user?.id ||
+      task.assignee_id ||
+      null;
+
+
+    // --------------------------------------------------------
+    // INSERT INTO ADMIN PROJECT REPORTS
+    // --------------------------------------------------------
+
+    const result = await pool.query(
+      `
+      INSERT INTO project_reports (
+
+        project_code,
+        task_id,
+
+        title,
+        report_type,
+        report_date,
+
+        summary,
+
+        key_activities,
+        issues_highlighted,
+
+        manpower_count,
+        equipment_on_site,
+        weather,
+
+        status,
+
+        prepared_by,
+        source,
+
+        created_at
+
+      )
+
+      VALUES (
+
+        $1,
+        $2,
+
+        $3,
+        $4,
+        CURRENT_DATE,
+
+        $5,
+
+        NULL,
+        NULL,
+
+        0,
+        NULL,
+        NULL,
+
+        'Submitted',
+
+        $6,
+        'Mobile Engineer',
+
+        NOW()
+
+      )
+
+      RETURNING
+        id,
+        project_code,
+        task_id,
+        title,
+        report_type,
+        report_date,
+        summary,
+        status,
+        prepared_by,
+        source,
+        created_at
+      `,
+      [
+        task.project_code,
+
+        taskId,
+
+        title ||
+          `AI Field Report - ${task.task_name}`,
+
+        report_type ||
+          'AI Field Report',
+
+        report_text.trim(),
+
+        preparedBy
+      ]
+    );
+
+
+    const uploadedReport =
+      result.rows[0];
+
+
+    console.log('════════════════════════════════════════');
+    console.log('✅ ENGINEER REPORT UPLOADED');
+    console.log(
+      'REPORT ID:',
+      uploadedReport.id
+    );
+    console.log(
+      'PROJECT:',
+      uploadedReport.project_code
+    );
+    console.log(
+      'TASK:',
+      task.task_name
+    );
+    console.log(
+      'ENGINEER:',
+      task.engineer_name ||
+      req.user?.email ||
+      'Unknown'
+    );
+    console.log('════════════════════════════════════════');
+
+
+    return res.status(201).json({
+
+      success: true,
+
+      message:
+        'Report uploaded to admin successfully.',
+
+      data: uploadedReport
+
+    });
+
+
+  } catch (err) {
+
+    console.error('════════════════════════════════════════');
+    console.error('❌ UPLOAD ENGINEER REPORT ERROR');
+    console.error('MESSAGE:', err.message);
+    console.error('CODE:', err.code);
+    console.error(err);
+    console.error('════════════════════════════════════════');
+
+
+    return res.status(500).json({
+
+      success: false,
+
+      message:
+        'Failed to upload report.',
+
+      error:
+        err.message
+
+    });
+  }
+};

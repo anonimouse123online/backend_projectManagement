@@ -2,7 +2,7 @@ const pool = require('../db');
 const projectService = require('../services/projectService');
 const crypto = require('crypto');
 
-// Helper — generates e.g. "A3F9-XK12"
+
 const generateInviteCode = () => {
   const part = () => crypto.randomBytes(2).toString('hex').toUpperCase();
   return `${part()}-${part()}`;
@@ -271,7 +271,6 @@ const getActiveCode = async (req, res) => {
 // ============================================================
 
 const getJoinedProjects = async (req, res) => {
-
   const userEmail = req.user?.email;
 
   if (!userEmail) {
@@ -282,12 +281,10 @@ const getJoinedProjects = async (req, res) => {
   }
 
   try {
-
     console.log('======================================');
     console.log('[JOINED PROJECTS]');
     console.log('USER EMAIL:', userEmail);
     console.log('======================================');
-
 
     const { rows } = await pool.query(
       `
@@ -302,7 +299,7 @@ const getJoinedProjects = async (req, res) => {
         p.phase,
         p.status,
 
-        0 AS progress,
+        COALESCE(p.progress, 0) AS progress,
 
         TO_CHAR(
           p.start_date,
@@ -322,16 +319,12 @@ const getJoinedProjects = async (req, res) => {
         ON p.code = pm.project_id
 
       WHERE LOWER(TRIM(pm.user_name))
-            =
-            LOWER(TRIM($1))
+        = LOWER(TRIM($1))
 
       ORDER BY pm.joined_at DESC
       `,
-      [
-        userEmail
-      ]
+      [userEmail]
     );
-
 
     console.log(
       `[JOINED PROJECTS] FOUND ${rows.length} PROJECT(S)`
@@ -342,12 +335,10 @@ const getJoinedProjects = async (req, res) => {
       rows
     );
 
-
     return res.status(200).json({
       success: true,
       data: rows
     });
-
 
   } catch (err) {
 
@@ -355,7 +346,6 @@ const getJoinedProjects = async (req, res) => {
       '❌ getJoinedProjects error:',
       err
     );
-
 
     return res.status(500).json({
       success: false,
@@ -440,26 +430,85 @@ const addMember = async (req, res) => {
 const getProjectMembers = async (req, res) => {
   const { code } = req.params;
 
+  console.log('\n========== GET PROJECT MEMBERS ==========');
+  console.log('Project code:', code);
+
   try {
-    const project = await pool.query(
-      'SELECT id FROM projects WHERE code = $1',
-      [code]
-    );
-    if (project.rows.length === 0)
-      return res.status(404).json({ message: `Project ${code} not found.` });
 
-    const { rows } = await pool.query(
-      `SELECT u.id, u.full_name AS name, u.email, u.role, pm.joined_at
-       FROM project_members pm
-       JOIN users u ON u.id = pm.user_id
-       WHERE pm.project_id = $1
-       ORDER BY pm.joined_at ASC`,
+    // Check project exists
+    const projectResult = await pool.query(
+      `
+      SELECT code, name
+      FROM projects
+      WHERE code = $1
+      LIMIT 1
+      `,
       [code]
     );
 
-    res.json({ success: true, data: rows });
+    if (projectResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `Project ${code} not found`
+      });
+    }
+
+
+    // Get members using the email stored in user_name
+    const result = await pool.query(
+      `
+      SELECT
+        u.id,
+        COALESCE(
+          NULLIF(TRIM(u.full_name), ''),
+          u.email
+        ) AS name,
+
+        u.email,
+
+        COALESCE(
+          NULLIF(TRIM(pm.role), ''),
+          u.role,
+          'Member'
+        ) AS role,
+
+        pm.joined_at
+
+      FROM project_members pm
+
+      INNER JOIN users u
+        ON LOWER(TRIM(u.email))
+         = LOWER(TRIM(pm.user_name))
+
+      WHERE pm.project_id::text = $1
+
+      ORDER BY pm.joined_at ASC
+      `,
+      [code]
+    );
+
+
+    console.log('Members found:', result.rows.length);
+    console.log(result.rows);
+    console.log('=========================================\n');
+
+
+    return res.status(200).json({
+      success: true,
+      data: result.rows
+    });
+
   } catch (err) {
-    res.status(500).json({ message: 'Failed to fetch project members', error: err.message });
+
+    console.error('\n========== MEMBERS ERROR ==========');
+    console.error(err);
+    console.error('===================================\n');
+
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch project members',
+      error: err.message
+    });
   }
 };
 
@@ -570,38 +619,163 @@ const getProjectActiveTask = async (req, res) => {
   }
 };
 // GET /projects/:code/documents
+// ============================================================
+// GET PROJECT DOCUMENTS
+// GET /projects/:code/documents
+// ============================================================
+
 const getDocuments = async (req, res) => {
+
   const { code } = req.params;
-  const { category } = req.query; // optional filter
+  const { category } = req.query;
+
+  console.log('');
+  console.log('======================================');
+  console.log('📥 GET PROJECT DOCUMENTS');
+  console.log('PROJECT CODE:', code);
+  console.log('CATEGORY:', category || 'ALL');
+  console.log('USER:', req.user?.email || 'Unknown');
+  console.log('======================================');
 
   try {
+
+    // ============================================================
+    // CHECK PROJECT
+    // ============================================================
+
+    console.log('[DOCUMENTS] Checking project...');
+
     const project = await pool.query(
-      'SELECT id FROM projects WHERE code = $1', [code]
+      `
+      SELECT id, code, name
+      FROM projects
+      WHERE code = $1
+      `,
+      [code]
     );
-    if (project.rows.length === 0)
-      return res.status(404).json({ message: `Project ${code} not found.` });
+
+    if (project.rows.length === 0) {
+
+      console.log(
+        `❌ [DOCUMENTS] Project ${code} not found`
+      );
+
+      return res.status(404).json({
+        success: false,
+        message: `Project ${code} not found.`
+      });
+    }
+
+    console.log(
+      '✅ [DOCUMENTS] Project found:',
+      project.rows[0]
+    );
+
+
+    // ============================================================
+    // BUILD DOCUMENT QUERY
+    // ============================================================
 
     let query = `
-      SELECT id, name, type, category, uploaded_at
+      SELECT
+        id,
+        name,
+        type,
+        category,
+        uploaded_at
       FROM documents
       WHERE project_code = $1
     `;
+
     const params = [code];
 
+
+    // ============================================================
+    // OPTIONAL CATEGORY FILTER
+    // ============================================================
+
     if (category) {
-      query += ` AND category = $2`;
+
       params.push(category);
+
+      query += `
+        AND category = $${params.length}
+      `;
     }
 
-    query += ` ORDER BY uploaded_at DESC`;
 
-    const { rows } = await pool.query(query, params);
-    res.json({ success: true, data: rows });
+    query += `
+      ORDER BY uploaded_at DESC
+    `;
+
+
+    // ============================================================
+    // GET DOCUMENTS
+    // ============================================================
+
+    console.log(
+      '[DOCUMENTS] Reading documents from database...'
+    );
+
+    const { rows } =
+      await pool.query(
+        query,
+        params
+      );
+
+
+    // ============================================================
+    // DEBUG OUTPUT
+    // ============================================================
+
+    console.log('');
+    console.log('======================================');
+    console.log('📄 DOCUMENT API RESULT');
+    console.log('PROJECT:', code);
+    console.log('COUNT:', rows.length);
+    console.log('DATA:', rows);
+    console.log('======================================');
+    console.log('');
+
+
+    // ============================================================
+    // RESPONSE
+    // ============================================================
+
+    return res.status(200).json({
+
+      success: true,
+
+      data: rows
+    });
+
+
   } catch (err) {
-    res.status(500).json({ message: 'Failed to fetch documents', error: err.message });
+
+    console.error('');
+    console.error('======================================');
+    console.error('❌ GET DOCUMENTS ERROR');
+    console.error('PROJECT:', code);
+    console.error('ERROR NAME:', err.name);
+    console.error('ERROR MESSAGE:', err.message);
+    console.error('ERROR CODE:', err.code);
+    console.error('STACK:', err.stack);
+    console.error('======================================');
+    console.error('');
+
+
+    return res.status(500).json({
+
+      success: false,
+
+      message:
+        'Failed to fetch documents',
+
+      error:
+        err.message
+    });
   }
 };
-
 // POST /projects/:code/documents
 const uploadDocument = async (req, res) => {
   const { code } = req.params;
@@ -711,55 +885,156 @@ const deleteProject = async (req, res) => {
 // ─── ACTION 1: PROJECT PROGRESS ─────────────────────────────────────────────
 
 // GET /projects/:code/progress
+// GET /projects/:code/progress
 const getProjectProgress = async (req, res) => {
   const { code } = req.params;
 
   try {
+    console.log('======================================');
+    console.log('[GET PROJECT PROGRESS]');
+    console.log('PROJECT:', code);
+    console.log('======================================');
+
+    // ============================================================
+    // GET PROJECT INCLUDING STORED PROGRESS
+    // ============================================================
+
     const projectRes = await pool.query(
-      'SELECT id, code, name, phase, status, progress_pct, start_date, end_date FROM projects WHERE code = $1',
+      `
+      SELECT
+        id,
+        code,
+        name,
+        phase,
+        status,
+        COALESCE(progress, 0) AS progress,
+        start_date,
+        end_date
+      FROM projects
+      WHERE code = $1
+      `,
       [code]
     );
+
     if (projectRes.rows.length === 0) {
-      return res.status(404).json({ message: `Project ${code} not found.` });
+      return res.status(404).json({
+        success: false,
+        message: `Project ${code} not found.`
+      });
     }
 
     const project = projectRes.rows[0];
 
-    // Fetch phase task breakdown
-    const taskBreakdown = await pool.query(
-      `SELECT phase,
-              COUNT(*) AS total_tasks,
-              COUNT(*) FILTER (WHERE status = 'Completed') AS completed_tasks,
-              COUNT(*) FILTER (WHERE status = 'In Progress') AS in_progress_tasks
-       FROM tasks
-       WHERE project_id = $1
-       GROUP BY phase`,
+    // ============================================================
+    // TASK STATISTICS
+    // These are informational only.
+    // They DO NOT determine project progress anymore.
+    // ============================================================
+
+    const statsRes = await pool.query(
+      `
+      SELECT
+        COUNT(*) AS total_tasks,
+
+        COUNT(*) FILTER (
+          WHERE LOWER(status) = 'completed'
+        ) AS completed_tasks,
+
+        COUNT(*) FILTER (
+          WHERE LOWER(status) = 'in progress'
+        ) AS in_progress_tasks
+
+      FROM tasks
+      WHERE project_id = $1
+      `,
       [project.id]
     );
 
-    // Fetch progress logs history
-    const logsRes = await pool.query(
-      `SELECT pl.id, pl.phase, pl.progress_pct, pl.summary, pl.work_completed,
-              pl.manpower, pl.weather, pl.created_at,
-              u.full_name AS logged_by_name, u.role AS logged_by_role
-       FROM project_progress_logs pl
-       LEFT JOIN users u ON u.id = pl.logged_by
-       WHERE pl.project_code = $1
-       ORDER BY pl.created_at DESC`,
-      [code]
+    const stats = statsRes.rows[0];
+
+    const totalTasks =
+      parseInt(stats.total_tasks) || 0;
+
+    const completedTasks =
+      parseInt(stats.completed_tasks) || 0;
+
+    const inProgressTasks =
+      parseInt(stats.in_progress_tasks) || 0;
+
+    // IMPORTANT:
+    // Use manually stored project progress.
+    const progressPct =
+      parseInt(project.progress) || 0;
+
+    // ============================================================
+    // TASK BREAKDOWN BY PHASE
+    // ============================================================
+
+    const phaseRes = await pool.query(
+      `
+      SELECT
+        phase,
+
+        COUNT(*) AS total_tasks,
+
+        COUNT(*) FILTER (
+          WHERE LOWER(status) = 'completed'
+        ) AS completed_tasks,
+
+        COUNT(*) FILTER (
+          WHERE LOWER(status) = 'in progress'
+        ) AS in_progress_tasks
+
+      FROM tasks
+
+      WHERE project_id = $1
+
+      GROUP BY phase
+
+      ORDER BY phase
+      `,
+      [project.id]
     );
 
-    res.json({
+    // ============================================================
+    // RESPONSE
+    // ============================================================
+
+    return res.status(200).json({
       success: true,
+
       data: {
-        project,
-        taskBreakdown: taskBreakdown.rows,
-        logs: logsRes.rows,
-      },
+        project: {
+          ...project,
+          progress: progressPct,
+          progress_pct: progressPct
+        },
+
+        stats: {
+          totalTasks,
+          completedTasks,
+          inProgressTasks,
+          progressPct
+        },
+
+        taskBreakdown: phaseRes.rows,
+
+        logs: []
+      }
     });
+
   } catch (err) {
-    console.error('getProjectProgress error:', err);
-    res.status(500).json({ message: 'Failed to fetch project progress', error: err.message });
+
+    console.error(
+      'getProjectProgress error:',
+      err
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch project progress',
+      error: err.message
+    });
   }
 };
 
@@ -793,78 +1068,190 @@ function getNextPhase(currentPhase) {
 }
 
 // POST /projects/:code/progress
+// POST /projects/:code/progress
 const logProjectProgress = async (req, res) => {
   const { code } = req.params;
-  const { phase, progress_pct, summary, work_completed, manpower, weather } = req.body;
-  const userId = req.user?.id || null;
 
-  if (!phase || progress_pct === undefined || !summary) {
-    return res.status(400).json({ message: 'phase, progress_pct, and summary are required.' });
-  }
+  const {
+    phase,
+    progress_pct,
+    summary,
+    work_completed,
+    manpower,
+    weather
+  } = req.body;
 
   try {
-    const pct = Math.min(100, Math.max(0, parseInt(progress_pct) || 0));
+    console.log('======================================');
+    console.log('[UPDATE PROJECT PROGRESS]');
+    console.log('PROJECT:', code);
+    console.log('BODY:', req.body);
+    console.log('======================================');
 
-    // Determine if phase should advance to the next phase upon 100% completion
-    let targetPhase = phase;
-    let targetStatus = 'Ongoing';
+    // ============================================================
+    // CHECK PROJECT
+    // ============================================================
+
+    const projectRes = await pool.query(
+      `
+      SELECT
+        id,
+        code,
+        name,
+        phase,
+        status,
+        COALESCE(progress, 0) AS progress
+      FROM projects
+      WHERE code = $1
+      `,
+      [code]
+    );
+
+    if (projectRes.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `Project ${code} not found.`
+      });
+    }
+
+    const project = projectRes.rows[0];
+
+    // ============================================================
+    // VALIDATE PROGRESS
+    // ============================================================
+
+    const pct = Math.min(
+      100,
+      Math.max(
+        0,
+        parseInt(progress_pct) || 0
+      )
+    );
+
+    let targetPhase =
+      phase || project.phase;
+
+    let targetStatus =
+      project.status;
+
+    // ============================================================
+    // DETERMINE PROJECT STATUS / PHASE
+    // ============================================================
+
     if (pct === 100) {
-      const advancement = getNextPhase(phase);
-      targetPhase = advancement.nextPhase;
-      if (advancement.isAllCompleted) targetStatus = 'Completed';
+
+      const advancement =
+        getNextPhase(targetPhase);
+
+      targetPhase =
+        advancement.nextPhase;
+
+      targetStatus =
+        advancement.isAllCompleted
+          ? 'Completed'
+          : 'Ongoing';
+
+    } else if (pct > 0) {
+
+      targetStatus = 'Ongoing';
     }
 
-    // Update current project phase and progress percentage
-    await pool.query(
-      `UPDATE projects
-       SET phase = $1, status = $2, progress_pct = $3, updated_at = NOW()
-       WHERE code = $4`,
-      [targetPhase, targetStatus, pct, code]
+    // ============================================================
+    // SAVE PROJECT PROGRESS
+    // ============================================================
+
+    const updateResult = await pool.query(
+      `
+      UPDATE projects
+      SET
+        phase = $1,
+        status = $2,
+        progress = $3,
+        updated_at = NOW()
+      WHERE code = $4
+
+      RETURNING
+        id,
+        code,
+        name,
+        phase,
+        status,
+        progress,
+        updated_at
+      `,
+      [
+        targetPhase,
+        targetStatus,
+        pct,
+        code
+      ]
     );
 
-    // Insert progress log
-    const { rows } = await pool.query(
-      `INSERT INTO project_progress_logs (project_code, phase, progress_pct, summary, work_completed, manpower, weather, logged_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING *`,
-      [code, phase, pct, summary.trim(), work_completed || null, parseInt(manpower) || 0, weather || 'Sunny', userId]
+    const updatedProject =
+      updateResult.rows[0];
+
+    console.log(
+      '[PROJECT PROGRESS SAVED]:',
+      updatedProject
     );
 
-    // Cascade Phase Milestone progress to tasks belonging to this project and phase
-    const projRes = await pool.query('SELECT id FROM projects WHERE code = $1', [code]);
-    if (projRes.rows.length > 0) {
-      const projId = projRes.rows[0].id;
-      const phaseKeyword = phase.includes(' - ') ? phase.split(' - ')[1].trim() : phase.trim();
-      let autoStatus = null;
-      if (pct === 100) autoStatus = 'Completed';
-      else if (pct > 0) autoStatus = 'In Progress';
+    // ============================================================
+    // IMPORTANT:
+    // DO NOT UPDATE TASK STATUS HERE.
+    //
+    // Project progress is independent from individual tasks.
+    // ============================================================
 
-      await pool.query(
-        `UPDATE tasks
-         SET progress_pct = $1,
-             status = COALESCE($2, status),
-             updated_at = NOW()
-         WHERE project_id = $3
-           AND (phase ILIKE '%' || $4 || '%' OR phase ILIKE $5)`,
-        [pct, autoStatus, projId, phaseKeyword, phase]
-      );
-      console.log(`[CASCADE] Synced tasks for project ${code} (${phase}) to ${pct}% progress (Active Phase advanced to: ${targetPhase})`);
-    }
-
-    res.status(201).json({
+    return res.status(200).json({
       success: true,
-      message: pct === 100
-        ? `Phase completed! Project automatically advanced to ${targetPhase}.`
-        : 'Progress update logged successfully and synced with task milestones.',
+
+      message:
+        pct === 100
+          ? `Project progress updated to ${pct}%.`
+          : 'Project progress updated.',
+
       data: {
-        ...rows[0],
-        nextPhase: targetPhase,
-        projectStatus: targetStatus,
-      },
+        project_code:
+          updatedProject.code,
+
+        phase:
+          updatedProject.phase,
+
+        status:
+          updatedProject.status,
+
+        progress:
+          updatedProject.progress,
+
+        progress_pct:
+          updatedProject.progress,
+
+        summary:
+          summary || null,
+
+        work_completed:
+          work_completed || null,
+
+        manpower:
+          parseInt(manpower) || 0,
+
+        weather:
+          weather || null
+      }
     });
+
   } catch (err) {
-    console.error('logProjectProgress error:', err);
-    res.status(500).json({ message: 'Failed to log progress update', error: err.message });
+
+    console.error(
+      'logProjectProgress error:',
+      err
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update project progress',
+      error: err.message
+    });
   }
 };
 
@@ -1013,36 +1400,103 @@ const getProjectReports = async (req, res) => {
   const { type, search } = req.query;
 
   try {
+
+    console.log('======================================');
+    console.log('[GET PROJECT REPORTS]');
+    console.log('PROJECT:', code);
+    console.log('TYPE:', type || 'ALL');
+    console.log('SEARCH:', search || '');
+    console.log('======================================');
+
     let query = `
-      SELECT r.id, r.project_code, r.title, r.report_type, r.report_date, r.summary,
-             r.key_activities, r.issues_highlighted, r.manpower_count, r.equipment_on_site,
-             r.weather, r.status, r.created_at,
-             u.full_name AS prepared_by_name, u.role AS prepared_by_role
+      SELECT
+        r.id,
+        r.project_code,
+        r.title,
+        r.report_type,
+        r.report_date,
+        r.summary,
+        r.key_activities,
+        r.issues_highlighted,
+        r.manpower_count,
+        r.equipment_on_site,
+        r.weather,
+        r.status,
+        r.created_at,
+
+        u.full_name AS prepared_by_name,
+        u.role AS prepared_by_role
+
       FROM project_reports r
-      LEFT JOIN users u ON u.id = r.prepared_by
+
+      LEFT JOIN users u
+        ON u.id = r.prepared_by
+
       WHERE r.project_code = $1
     `;
+
     const params = [code];
 
     if (type && type !== 'All') {
+
       params.push(type);
-      query += ` AND r.report_type = $${params.length}`;
-    }
-    if (search) {
-      params.push(`%${search.trim().toLowerCase()}%`);
-      query += ` AND (LOWER(r.title) LIKE $${params.length} OR LOWER(r.summary) LIKE $${params.length})`;
+
+      query += `
+        AND r.report_type = $${params.length}
+      `;
     }
 
-    query += ` ORDER BY r.report_date DESC, r.created_at DESC`;
+    if (search && search.trim()) {
 
-    const { rows } = await pool.query(query, params);
-    res.json({ success: true, data: rows });
+      params.push(
+        `%${search.trim().toLowerCase()}%`
+      );
+
+      query += `
+        AND (
+          LOWER(r.title) LIKE $${params.length}
+          OR LOWER(r.summary) LIKE $${params.length}
+        )
+      `;
+    }
+
+    query += `
+      ORDER BY r.created_at DESC
+    `;
+
+    const { rows } =
+      await pool.query(
+        query,
+        params
+      );
+
+    console.log(
+      `[PROJECT REPORTS] FOUND ${rows.length}`
+    );
+
+    console.log(rows);
+
+    return res.status(200).json({
+      success: true,
+      data: rows
+    });
+
   } catch (err) {
-    console.error('getProjectReports error:', err);
-    res.status(500).json({ message: 'Failed to fetch project reports', error: err.message });
+
+    console.error('======================================');
+    console.error('[GET PROJECT REPORTS ERROR]');
+    console.error('MESSAGE:', err.message);
+    console.error('CODE:', err.code);
+    console.error(err);
+    console.error('======================================');
+
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch project reports',
+      error: err.message
+    });
   }
 };
-
 // POST /projects/:code/reports
 const createProjectReport = async (req, res) => {
   const { code } = req.params;
