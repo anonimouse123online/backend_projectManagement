@@ -6,6 +6,148 @@ const FormData = require('form-data');
 
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
 
+// ============================================================
+// AUTH + PROJECT/TASK ACCESS HELPERS
+// ============================================================
+
+const requireAuth = (req, res) => {
+  if (req.user?.id) {
+    return true;
+  }
+
+  res.status(401).json({
+    success: false,
+    message: 'Authentication required.'
+  });
+
+  return false;
+};
+
+
+// ============================================================
+// CHECK PROJECT ACCESS
+//
+// Access allowed when:
+// 1. User owns project
+// 2. User joined project
+//
+// project_members.project_id -> projects.code
+// ============================================================
+
+const getAccessibleProject = async (
+  projectIdentifier,
+  userId
+) => {
+
+  if (!userId || !projectIdentifier) {
+    return null;
+  }
+
+  const { rows } = await pool.query(
+    `
+    SELECT
+      p.id,
+      p.code,
+      p.name,
+      p.owner_id
+
+    FROM projects p
+
+    WHERE
+      (
+        p.id::text = $1::text
+        OR p.code = $1
+        OR p.name ILIKE $1
+      )
+
+      AND (
+        p.owner_id = $2::uuid
+
+        OR EXISTS (
+          SELECT 1
+
+          FROM project_members pm
+
+          WHERE pm.project_id = p.code
+            AND pm.user_id = $2::uuid
+        )
+      )
+
+    LIMIT 1
+    `,
+    [
+      projectIdentifier,
+      userId
+    ]
+  );
+
+  return rows[0] || null;
+};
+
+
+// ============================================================
+// CHECK TASK ACCESS
+//
+// User can access a task when:
+// 1. They own its project
+// 2. They joined its project
+// 3. They are the assigned engineer
+// ============================================================
+
+const getAccessibleTask = async (
+  taskId,
+  userId
+) => {
+
+  if (!taskId || !userId) {
+    return null;
+  }
+
+  const { rows } = await pool.query(
+    `
+    SELECT
+      t.id,
+      t.task_name,
+      t.project_id,
+      t.assignee_id,
+
+      p.code AS project_code,
+      p.name AS project_name,
+      p.owner_id
+
+    FROM tasks t
+
+    INNER JOIN projects p
+      ON p.id = t.project_id
+
+    WHERE t.id::text = $1::text
+
+      AND (
+        p.owner_id = $2::uuid
+
+        OR t.assignee_id = $2::uuid
+
+        OR EXISTS (
+          SELECT 1
+
+          FROM project_members pm
+
+          WHERE pm.project_id = p.code
+            AND pm.user_id = $2::uuid
+        )
+      )
+
+    LIMIT 1
+    `,
+    [
+      taskId,
+      userId
+    ]
+  );
+
+  return rows[0] || null;
+};
+
 // ─── Multer Storage ───────────────────────────────────────────────────────────
 const storage = multer.diskStorage({
   destination: function(req, file, cb) {
@@ -37,7 +179,30 @@ exports.upload = multer({
 
 // ─── GET ALL TASKS ────────────────────────────────────────────────────────────
 // ─── GET ALL TASKS ────────────────────────────────────────────────────────────
-exports.getTasks = async function(req, res) {
+// ============================================================
+// GET ALL TASKS
+// GET /tasks
+// ============================================================
+
+// ============================================================
+// GET ALL ACCESSIBLE TASKS
+// GET /tasks
+//
+// Admin:
+// - tasks from owned projects
+// - tasks from joined projects
+//
+// Engineer:
+// - tasks assigned directly to them
+// - tasks from projects they joined
+// ============================================================
+
+exports.getTasks = async function (req, res) {
+
+  if (!requireAuth(req, res)) {
+    return;
+  }
+
   const {
     project_id,
     status,
@@ -47,359 +212,805 @@ exports.getTasks = async function(req, res) {
     search
   } = req.query;
 
-  console.log('[ROUTE] GET /tasks filters:', {
-    project_id,
-    status,
-    phase,
-    priority,
-    assignee_id,
-    search
-  });
+
+  const userId =
+    req.user.id;
+
+
+  console.log('======================================');
+  console.log('[GET TASKS]');
+  console.log('USER:', req.user?.email);
+  console.log('USER ID:', userId);
+  console.log('PROJECT:', project_id || 'ALL');
+  console.log('======================================');
+
 
   try {
-    const conditions = [];
-    const params = [];
 
+    // ============================================================
+    // ACCESS CONDITION
+    // ============================================================
+
+    const conditions = [
+      `
+      (
+        p.owner_id = $1::uuid
+
+        OR t.assignee_id = $1::uuid
+
+        OR EXISTS (
+          SELECT 1
+
+          FROM project_members pm
+
+          WHERE pm.project_id = p.code
+            AND pm.user_id = $1::uuid
+        )
+      )
+      `
+    ];
+
+
+    const params = [
+      userId
+    ];
+
+
+    // ============================================================
     // PROJECT FILTER
-    if (project_id) {
-      params.push(project_id);
+    //
+    // Frontend may send:
+    // PRJ-2026-824
+    // OR actual UUID
+    // ============================================================
 
-      conditions.push(
-        `(t.project_id::text = $${params.length}
-          OR p.code = $${params.length})`
+    if (
+      project_id &&
+      project_id !== 'All'
+    ) {
+
+      params.push(
+        project_id
       );
+
+
+      conditions.push(`
+        (
+          p.id::text = $${params.length}::text
+          OR p.code = $${params.length}
+          OR p.name ILIKE $${params.length}
+        )
+      `);
     }
 
+
+    // ============================================================
     // STATUS FILTER
+    // ============================================================
+
     if (
       status &&
       status !== 'All' &&
       status !== 'All Statuses'
     ) {
-      params.push(`%${status.replace('-', '%')}%`);
+
+      params.push(
+        `%${status.replace('-', '%')}%`
+      );
+
 
       conditions.push(
         `t.status ILIKE $${params.length}`
       );
     }
 
+
+    // ============================================================
     // PHASE FILTER
+    // ============================================================
+
     if (
       phase &&
       phase !== 'All'
     ) {
-      params.push(`%${phase}%`);
+
+      params.push(
+        `%${phase}%`
+      );
+
 
       conditions.push(
         `t.phase ILIKE $${params.length}`
       );
     }
 
+
+    // ============================================================
     // PRIORITY FILTER
+    // ============================================================
+
     if (
       priority &&
       priority !== 'All'
     ) {
-      params.push(priority);
+
+      params.push(
+        priority
+      );
+
 
       conditions.push(
         `t.priority ILIKE $${params.length}`
       );
     }
 
+
+    // ============================================================
     // ASSIGNEE FILTER
+    // ============================================================
+
     if (assignee_id) {
-      params.push(assignee_id);
 
-      conditions.push(
-        `(t.assignee_id::text = $${params.length}
-          OR u.full_name ILIKE $${params.length})`
+      params.push(
+        assignee_id
       );
+
+
+      conditions.push(`
+        (
+          t.assignee_id::text =
+            $${params.length}::text
+
+          OR u.full_name
+            ILIKE $${params.length}
+
+          OR u.email
+            ILIKE $${params.length}
+        )
+      `);
     }
 
+
+    // ============================================================
     // SEARCH
-    if (search) {
-      params.push(`%${search}%`);
+    // ============================================================
 
-      conditions.push(
-        `(t.task_name ILIKE $${params.length}
-          OR t.site_instructions ILIKE $${params.length}
-          OR p.name ILIKE $${params.length}
-          OR p.code ILIKE $${params.length})`
+    if (
+      search &&
+      search.trim()
+    ) {
+
+      params.push(
+        `%${search.trim()}%`
       );
+
+
+      conditions.push(`
+        (
+          t.task_name
+            ILIKE $${params.length}
+
+          OR COALESCE(
+            t.site_instructions,
+            ''
+          ) ILIKE $${params.length}
+
+          OR p.name
+            ILIKE $${params.length}
+
+          OR p.code
+            ILIKE $${params.length}
+
+          OR COALESCE(
+            u.full_name,
+            ''
+          ) ILIKE $${params.length}
+        )
+      `);
     }
 
-    const where = conditions.length
-      ? `WHERE ${conditions.join(' AND ')}`
-      : '';
+
+    // ============================================================
+    // QUERY
+    // ============================================================
 
     const query = `
       SELECT
+
         t.id,
-        COALESCE(t.task_name, t.title, 'Untitled Task') AS task_name,
+
+        COALESCE(
+          t.task_name,
+          'Untitled Task'
+        ) AS task_name,
+
         t.phase,
+
         t.project_id,
 
-        p.name AS project_name,
-        p.code AS project_code,
+        p.name
+          AS project_name,
 
-        u.full_name AS assignee,
-        u.id AS assignee_id,
+        p.code
+          AS project_code,
 
-        TO_CHAR(
-          t.due_date::date,
-          'Mon DD, YYYY'
-        ) AS due_date,
-
-        t.priority,
-        t.status,
-        t.manpower_needed,
-        t.materials_required,
-        t.site_instructions,
-
-        '[]'::jsonb AS subtasks,
+        p.owner_id,
 
         CASE
-          WHEN t.status ILIKE 'completed'
-            THEN 100
+          WHEN p.owner_id = $1::uuid
+            THEN 'owner'
 
-          WHEN t.status ILIKE 'in progress'
-            OR t.status ILIKE 'in-progress'
-            OR t.status ILIKE 'ongoing'
-            THEN 50
+          WHEN t.assignee_id = $1::uuid
+            THEN 'assignee'
 
-          ELSE 0
-        END AS progress_pct
+          ELSE 'member'
+        END AS access_type,
+
+        u.full_name
+          AS assignee,
+
+        u.id
+          AS assignee_id,
+
+        /*
+         * IMPORTANT:
+         * Do not force ::date here.
+         *
+         * Some older rows may contain legacy due_date values.
+         * Returning text prevents one bad old row from crashing
+         * GET /tasks.
+         */
+        t.due_date::text
+          AS due_date,
+
+        t.priority,
+
+        t.status,
+
+        t.manpower_needed,
+
+        t.materials_required,
+
+        t.site_instructions,
+
+        COALESCE(
+          t.subtasks,
+          '[]'::jsonb
+        ) AS subtasks,
+
+        COALESCE(
+          t.progress_pct,
+
+          CASE
+
+            WHEN t.status
+              ILIKE 'completed'
+              THEN 100
+
+            WHEN
+              t.status ILIKE 'in progress'
+
+              OR t.status
+                ILIKE 'in-progress'
+
+              OR t.status
+                ILIKE 'ongoing'
+
+              THEN 50
+
+            ELSE 0
+
+          END
+        ) AS progress_pct
+
 
       FROM tasks t
+
+
+      INNER JOIN projects p
+        ON p.id = t.project_id
+
 
       LEFT JOIN users u
         ON u.id = t.assignee_id
 
-      LEFT JOIN projects p
-        ON p.id::text = t.project_id::text OR p.code = t.project_id::text
 
-      ${where}
+      WHERE
+        ${conditions.join(' AND ')}
+
 
       ORDER BY
-        t.phase,
+
+        t.phase NULLS LAST,
+
         t.created_at DESC
     `;
 
-    console.log('[ROUTE] Executing GET /tasks query...');
 
-    const result = await pool.query(
-      query,
-      params
-    );
+    const result =
+      await pool.query(
+        query,
+        params
+      );
+
 
     console.log(
-      '[ROUTE] GET /tasks → returned',
+      '[GET TASKS] returned',
       result.rows.length,
       'task(s)'
     );
 
+
     return res.status(200).json({
+
       success: true,
-      data: result.rows
+
+      data:
+        result.rows
+
     });
 
+
   } catch (err) {
-    console.error(
-      '[ROUTE] GET /tasks ERROR:',
-      err
-    );
+
+    console.error('======================================');
+    console.error('❌ GET TASKS ERROR');
+    console.error('MESSAGE:', err.message);
+    console.error('CODE:', err.code);
+    console.error('USER:', req.user);
+    console.error('======================================');
+
 
     return res.status(500).json({
+
       success: false,
-      error: 'Failed to fetch tasks.',
-      details: err.message
+
+      error:
+        'Failed to fetch tasks.',
+
+      details:
+        err.message
+
     });
   }
 };
 
 // ─── GET TASK BY ID ───────────────────────────────────────────────────────────
-exports.getTaskById = async function(req, res) {
-  console.log('[ROUTE] GET /tasks/' + req.params.id);
-  try {
-    const id = req.params.id;
-    const result = await pool.query(
-      `SELECT
-         t.id,
-         COALESCE(t.task_name, t.title, 'Untitled Task') AS task_name,
-         t.phase,
-         u.full_name AS assignee,
-         TO_CHAR(t.due_date::date, 'Mon DD, YYYY') AS due_date,
-         t.priority, t.status, t.manpower_needed,
-         t.materials_required, t.site_instructions,
-         p.name AS project_name, p.code AS project_code,
-         COALESCE(
-           NULLIF(t.progress_pct, 0),
-           (
-             SELECT pl.progress_pct
-             FROM project_progress_logs pl
-             WHERE pl.project_code = p.code
-               AND (pl.phase ILIKE '%' || SPLIT_PART(t.phase, ' - ', 2) || '%' OR pl.phase ILIKE t.phase)
-             ORDER BY pl.created_at DESC
-             LIMIT 1
-           ),
-           CASE WHEN t.status ILIKE 'completed' THEN 100
-                WHEN t.status ILIKE 'in%progress' OR t.status ILIKE 'ongoing' THEN COALESCE(p.progress_pct, 50)
-                ELSE 0 END,
-           0
-         ) AS progress_pct,
-       '[]'::jsonb AS subtasks,
-         (
-           SELECT pl.progress_pct
-           FROM project_progress_logs pl
-           WHERE pl.project_code = p.code
-             AND (pl.phase ILIKE '%' || SPLIT_PART(t.phase, ' - ', 2) || '%' OR pl.phase ILIKE t.phase)
-           ORDER BY pl.created_at DESC
-           LIMIT 1
-         ) AS phase_milestone_pct
-       FROM tasks t
-       LEFT JOIN users u ON u.id = t.assignee_id
-       LEFT JOIN projects p ON p.id::text = t.project_id::text OR p.code = t.project_id::text
-       WHERE t.id::text = $1::text`,
-      [id]
-    );
-    if (result.rows.length === 0) {
-      console.warn('[ROUTE] GET /tasks/' + id + ' → 404 not found');
-      return res.status(404).json({ error: 'Task not found.' });
-    }
-    console.log('[ROUTE] GET /tasks/' + id + ' → found:', result.rows[0].task_name);
-    res.json({ success: true, data: result.rows[0] });
-  } catch (err) {
-    console.error('[ROUTE] GET /tasks/:id ERROR:', err);
-    res.status(500).json({ error: 'Failed to fetch task.' });
+// ============================================================
+// GET TASK BY ID
+// GET /tasks/:id
+// ============================================================
+
+// ============================================================
+// GET TASK BY ID
+// GET /tasks/:id
+// ============================================================
+
+exports.getTaskById = async function (req, res) {
+
+  if (!requireAuth(req, res)) {
+    return;
   }
-};
 
-// ─── UPDATE TASK STATUS ───────────────────────────────────────────────────────
-exports.updateTaskStatus = async function(req, res) {
-  const id = req.params.id;
-  const status = req.body.status;
-  let progress_pct = req.body.progress_pct;
 
-  console.log('[ROUTE] PATCH /tasks/' + req.params.id + '/status → ', status);
-  try {
-    if (progress_pct === undefined && status) {
-      const st = status.toLowerCase();
-      if (st.includes('completed')) {
-        progress_pct = 100;
-      } else if (st.includes('pending')) {
-        progress_pct = 0;
-      } else if (st.includes('in-progress') || st.includes('ongoing') || st.includes('in progress')) {
-        const cur = await pool.query('SELECT progress_pct FROM tasks WHERE id = $1::uuid', [id]);
-        const curVal = cur.rows[0]?.progress_pct || 0;
-        progress_pct = curVal > 0 ? curVal : 50;
-      }
-    }
+  const id =
+    req.params.id;
 
-    const result = await pool.query(
-      `UPDATE tasks
-       SET status = COALESCE($1, status),
-           progress_pct = COALESCE($2, progress_pct),
-           updated_at = NOW()
-       WHERE id = $3::uuid
-       RETURNING *`,
-      [status, progress_pct, id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Task not found.' });
-    }
-
-    console.log('[ROUTE] PATCH /tasks/' + id + '/status → updated:', result.rows[0].status, 'progress:', result.rows[0].progress_pct + '%');
-    res.json({ success: true, data: result.rows[0] });
-  } catch (err) {
-    console.error('[ROUTE] PATCH /tasks/:id/status ERROR:', err);
-    res.status(500).json({ error: 'Failed to update task status.' });
-  }
-};
-
-// ============================================================
-// COMPLETE TASK
-// PATCH /tasks/:id/complete
-// ============================================================
-
-// ============================================================
-// COMPLETE TASK
-// PATCH /tasks/:id/complete
-// ============================================================
-
-exports.completeTask = async function(req, res) {
-
-  const taskId =
-    req.params.id || req.params.taskId;
-
-  console.log(
-    '════════════════════════════════════════'
-  );
-
-  console.log(
-    '[COMPLETE TASK] TASK ID:',
-    taskId
-  );
 
   try {
 
-    // --------------------------------------------------------
-    // FIND TASK
-    // --------------------------------------------------------
-
-    const taskResult =
-      await pool.query(
-        `
-        SELECT
-          t.id,
-          t.task_name,
-          t.status,
-          t.project_id,
-
-          p.code AS project_code,
-          p.name AS project_name
-
-        FROM tasks t
-
-        LEFT JOIN projects p
-          ON p.id = t.project_id
-
-        WHERE t.id = $1::uuid
-
-        LIMIT 1
-        `,
-        [taskId]
+    const access =
+      await getAccessibleTask(
+        id,
+        req.user.id
       );
 
 
-    if (taskResult.rows.length === 0) {
+    if (!access) {
 
       return res.status(404).json({
         success: false,
-        message: 'Task not found.'
+        error:
+          'Task not found or you do not have access.'
       });
     }
 
 
+    const result =
+      await pool.query(
+        `
+        SELECT
+
+          t.id,
+
+          COALESCE(
+            t.task_name,
+            'Untitled Task'
+          ) AS task_name,
+
+          t.phase,
+
+          t.project_id,
+
+          u.full_name
+            AS assignee,
+
+          u.id
+            AS assignee_id,
+
+          t.due_date::text
+            AS due_date,
+
+          t.priority,
+
+          t.status,
+
+          t.manpower_needed,
+
+          t.materials_required,
+
+          t.site_instructions,
+
+          p.name
+            AS project_name,
+
+          p.code
+            AS project_code,
+
+          COALESCE(
+            t.progress_pct,
+
+            CASE
+
+              WHEN t.status
+                ILIKE 'completed'
+                THEN 100
+
+              WHEN
+                t.status ILIKE 'in progress'
+
+                OR t.status ILIKE 'in-progress'
+
+                OR t.status ILIKE 'ongoing'
+
+                THEN 50
+
+              ELSE 0
+
+            END
+          ) AS progress_pct,
+
+          COALESCE(
+            t.subtasks,
+            '[]'::jsonb
+          ) AS subtasks,
+
+
+          CASE
+
+            WHEN p.owner_id = $2::uuid
+              THEN 'owner'
+
+            WHEN t.assignee_id = $2::uuid
+              THEN 'assignee'
+
+            ELSE 'member'
+
+          END AS access_type
+
+
+        FROM tasks t
+
+
+        INNER JOIN projects p
+          ON p.id = t.project_id
+
+
+        LEFT JOIN users u
+          ON u.id = t.assignee_id
+
+
+        WHERE t.id::text =
+          $1::text
+
+
+          AND (
+
+            p.owner_id =
+              $2::uuid
+
+
+            OR t.assignee_id =
+              $2::uuid
+
+
+            OR EXISTS (
+
+              SELECT 1
+
+              FROM project_members pm
+
+              WHERE pm.project_id =
+                p.code
+
+                AND pm.user_id =
+                  $2::uuid
+
+            )
+
+          )
+
+
+        LIMIT 1
+        `,
+        [
+          id,
+          req.user.id
+        ]
+      );
+
+
+    if (
+      result.rows.length === 0
+    ) {
+
+      return res.status(404).json({
+        success: false,
+        error:
+          'Task not found or you do not have access.'
+      });
+    }
+
+
+    return res.status(200).json({
+
+      success: true,
+
+      data:
+        result.rows[0]
+
+    });
+
+
+  } catch (err) {
+
+    console.error(
+      'GET /tasks/:id error:',
+      err
+    );
+
+
+    return res.status(500).json({
+
+      success: false,
+
+      error:
+        'Failed to fetch task.',
+
+      details:
+        err.message
+
+    });
+  }
+};  
+
+// ─── UPDATE TASK STATUS ───────────────────────────────────────────────────────
+exports.updateTaskStatus = async function (
+  req,
+  res
+) {
+
+  if (!requireAuth(req, res)) {
+    return;
+  }
+
+
+  const id =
+    req.params.id;
+
+
+  const status =
+    req.body.status;
+
+
+  let progress_pct =
+    req.body.progress_pct;
+
+
+  try {
+
     const task =
-      taskResult.rows[0];
+      await getAccessibleTask(
+        id,
+        req.user.id
+      );
 
 
-    console.log(
-      '[COMPLETE TASK] TASK:',
-      task.task_name
+    if (!task) {
+
+      return res.status(404).json({
+        success: false,
+        error:
+          'Task not found or you do not have access.'
+      });
+    }
+
+
+    if (
+      progress_pct === undefined &&
+      status
+    ) {
+
+      const st =
+        status.toLowerCase();
+
+
+      if (
+        st.includes(
+          'completed'
+        )
+      ) {
+
+        progress_pct = 100;
+
+
+      } else if (
+        st.includes(
+          'pending'
+        )
+      ) {
+
+        progress_pct = 0;
+
+
+      } else if (
+        st.includes(
+          'in-progress'
+        ) ||
+
+        st.includes(
+          'ongoing'
+        ) ||
+
+        st.includes(
+          'in progress'
+        )
+      ) {
+
+        const current =
+          await pool.query(
+            `
+            SELECT
+              progress_pct
+
+            FROM tasks
+
+            WHERE id = $1::uuid
+            `,
+            [
+              id
+            ]
+          );
+
+
+        const currentValue =
+          current.rows[0]
+            ?.progress_pct || 0;
+
+
+        progress_pct =
+          currentValue > 0
+            ? currentValue
+            : 50;
+      }
+    }
+
+
+    const result =
+      await pool.query(
+        `
+        UPDATE tasks
+
+        SET
+          status =
+            COALESCE(
+              $1,
+              status
+            ),
+
+          progress_pct =
+            COALESCE(
+              $2,
+              progress_pct
+            ),
+
+          updated_at =
+            NOW()
+
+        WHERE id =
+          $3::uuid
+
+        RETURNING *
+        `,
+        [
+          status,
+          progress_pct,
+          id
+        ]
+      );
+
+
+    return res.status(200).json({
+
+      success: true,
+
+      data:
+        result.rows[0]
+
+    });
+
+
+  } catch (err) {
+
+    console.error(
+      'updateTaskStatus error:',
+      err
     );
 
-    console.log(
-      '[COMPLETE TASK] PROJECT:',
-      task.project_code || 'N/A'
-    );
+
+    return res.status(500).json({
+      success: false,
+      error:
+        'Failed to update task status.',
+      details:
+        err.message
+    });
+  }
+};
+
+// ============================================================
+// COMPLETE TASK
+// PATCH /tasks/:id/complete
+// ============================================================
+
+// ============================================================
+// COMPLETE TASK
+// PATCH /tasks/:id/complete
+// ============================================================
+
+exports.completeTask = async function (
+  req,
+  res
+) {
+
+  if (!requireAuth(req, res)) {
+    return;
+  }
 
 
-    // --------------------------------------------------------
-    // UPDATE TASK
-    // --------------------------------------------------------
+  const taskId =
+    req.params.id ||
+    req.params.taskId;
+
+
+  try {
+
+    const task =
+      await getAccessibleTask(
+        taskId,
+        req.user.id
+      );
+
+
+    if (!task) {
+
+      return res.status(404).json({
+        success: false,
+        message:
+          'Task not found or you do not have access.'
+      });
+    }
+
 
     const result =
       await pool.query(
@@ -408,6 +1019,7 @@ exports.completeTask = async function(req, res) {
 
         SET
           status = 'Completed',
+          progress_pct = 100,
           updated_at = NOW()
 
         WHERE id = $1::uuid
@@ -416,34 +1028,15 @@ exports.completeTask = async function(req, res) {
           id,
           task_name,
           project_id,
+          assignee_id,
           status,
+          progress_pct,
           updated_at
         `,
-        [taskId]
+        [
+          taskId
+        ]
       );
-
-
-    const completedTask =
-      result.rows[0];
-
-
-    console.log(
-      '✅ TASK COMPLETED'
-    );
-
-    console.log(
-      'TASK:',
-      completedTask.task_name
-    );
-
-    console.log(
-      'STATUS:',
-      completedTask.status
-    );
-
-    console.log(
-      '════════════════════════════════════════'
-    );
 
 
     return res.status(200).json({
@@ -453,12 +1046,8 @@ exports.completeTask = async function(req, res) {
       message:
         'Task marked as completed successfully.',
 
-      data: {
-        ...completedTask,
-
-        // Android can still receive 100%
-        progress_pct: 100
-      }
+      data:
+        result.rows[0]
 
     });
 
@@ -466,27 +1055,8 @@ exports.completeTask = async function(req, res) {
   } catch (err) {
 
     console.error(
-      '════════════════════════════════════════'
-    );
-
-    console.error(
-      '❌ COMPLETE TASK ERROR'
-    );
-
-    console.error(
-      'MESSAGE:',
-      err.message
-    );
-
-    console.error(
-      'CODE:',
-      err.code
-    );
-
-    console.error(err);
-
-    console.error(
-      '════════════════════════════════════════'
+      'completeTask error:',
+      err
     );
 
 
@@ -543,122 +1113,629 @@ exports.updateTaskSubtasks = async function(req, res) {
 };
 
 // ─── CREATE TASK ──────────────────────────────────────────────────────────────
-exports.createTask = async function(req, res) {
-  console.log('[ROUTE] POST /tasks → creating task:', req.body.taskName || req.body.task_name);
+// ============================================================
+// CREATE TASK
+// POST /tasks
+// ============================================================
+
+// ============================================================
+// CREATE TASK
+// POST /tasks
+// ============================================================
+
+// ============================================================
+// CREATE TASK
+// POST /tasks
+// ============================================================
+
+exports.createTask = async function (req, res) {
+
+  if (!requireAuth(req, res)) {
+    return;
+  }
+
+
+  console.log(
+    '[POST /tasks]',
+    req.body.taskName ||
+    req.body.task_name
+  );
+
+
   try {
-    const taskName          = (req.body.taskName || req.body.task_name || '').trim();
-    const phase             = (req.body.phase || '').trim();
-    let assigneeId          = (req.body.assigneeId || req.body.assignee_id || '').trim();
-    const dueDate           = (req.body.dueDate || req.body.due_date || '').trim();
-    const priority          = (req.body.priority || '').trim();
-    const manpowerNeeded    = (req.body.manpowerNeeded || req.body.manpower_needed || '').trim();
-    const materialsRequired = (req.body.materialsRequired || req.body.materials_required || '').trim();
-    const siteInstructions  = (req.body.siteInstructions || req.body.site_instructions || '').trim();
-    let projectId           = (req.body.projectId || req.body.project_id || '').trim();
 
-    // Check all fields are provided
+    // ============================================================
+    // REQUEST DATA
+    // ============================================================
+
+    const taskName =
+      (
+        req.body.taskName ||
+        req.body.task_name ||
+        ''
+      ).trim();
+
+
+    const phase =
+      (
+        req.body.phase ||
+        ''
+      ).trim();
+
+
+    let assigneeId =
+      (
+        req.body.assigneeId ||
+        req.body.assignee_id ||
+        ''
+      ).trim();
+
+
+    const dueDate =
+      (
+        req.body.dueDate ||
+        req.body.due_date ||
+        ''
+      ).trim();
+
+
+    const priority =
+      (
+        req.body.priority ||
+        ''
+      ).trim();
+
+
+    const manpowerNeeded =
+      (
+        req.body.manpowerNeeded ||
+        req.body.manpower_needed ||
+        ''
+      ).trim();
+
+
+    const materialsRequired =
+      (
+        req.body.materialsRequired ||
+        req.body.materials_required ||
+        ''
+      ).trim();
+
+
+    const siteInstructions =
+      (
+        req.body.siteInstructions ||
+        req.body.site_instructions ||
+        ''
+      ).trim();
+
+
+    const projectIdentifier =
+      (
+        req.body.projectId ||
+        req.body.project_id ||
+        ''
+      ).trim();
+
+
+    // ============================================================
+    // VALIDATION
+    // ============================================================
+
     if (!taskName) {
-      return res.status(400).json({ error: 'Task name is required.' });
+
+      return res.status(400).json({
+        success: false,
+        error:
+          'Task name is required.'
+      });
     }
+
+
     if (!phase) {
-      return res.status(400).json({ error: 'Phase is required.' });
+
+      return res.status(400).json({
+        success: false,
+        error:
+          'Phase is required.'
+      });
     }
-    if (!projectId) {
-      return res.status(400).json({ error: 'Project is required.' });
+
+
+    if (!projectIdentifier) {
+
+      return res.status(400).json({
+        success: false,
+        error:
+          'Project is required.'
+      });
     }
+
+
     if (!assigneeId) {
-      return res.status(400).json({ error: 'Assignee engineer is required.' });
+
+      return res.status(400).json({
+        success: false,
+        error:
+          'Assignee engineer is required.'
+      });
     }
+
+
     if (!dueDate) {
-      return res.status(400).json({ error: 'Due date is required.' });
+
+      return res.status(400).json({
+        success: false,
+        error:
+          'Due date is required.'
+      });
     }
+
+
     if (!priority) {
-      return res.status(400).json({ error: 'Priority is required.' });
+
+      return res.status(400).json({
+        success: false,
+        error:
+          'Priority is required.'
+      });
     }
+
+
     if (!manpowerNeeded) {
-      return res.status(400).json({ error: 'Manpower needed is required.' });
+
+      return res.status(400).json({
+        success: false,
+        error:
+          'Manpower needed is required.'
+      });
     }
+
+
     if (!materialsRequired) {
-      return res.status(400).json({ error: 'Materials required is required.' });
+
+      return res.status(400).json({
+        success: false,
+        error:
+          'Materials required is required.'
+      });
     }
+
+
     if (!siteInstructions) {
-      return res.status(400).json({ error: 'Site instructions are required.' });
+
+      return res.status(400).json({
+        success: false,
+        error:
+          'Site instructions are required.'
+      });
     }
 
-    // Resolve projectId if passed as project code or UUID
-    let resolvedProjectId = null;
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId);
-    if (isUuid) {
-      resolvedProjectId = projectId;
+
+    // ============================================================
+    // RESOLVE + AUTHORIZE PROJECT
+    // ============================================================
+
+    const project =
+      await getAccessibleProject(
+        projectIdentifier,
+        req.user.id
+      );
+
+
+    if (!project) {
+
+      return res.status(403).json({
+        success: false,
+        error:
+          'Project not found or you do not have access to it.'
+      });
+    }
+
+
+    const resolvedProjectId =
+      project.id;
+
+
+    // ============================================================
+    // RESOLVE ASSIGNEE
+    // ============================================================
+
+    const isAssigneeUuid =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+        .test(
+          assigneeId
+        );
+
+
+    let userResult;
+
+
+    if (isAssigneeUuid) {
+
+      userResult =
+        await pool.query(
+          `
+          SELECT
+            id,
+            full_name,
+            email,
+            role
+
+          FROM users
+
+          WHERE id = $1::uuid
+            AND is_active = TRUE
+
+          LIMIT 1
+          `,
+          [
+            assigneeId
+          ]
+        );
+
+
     } else {
-      const pRes = await pool.query('SELECT id FROM projects WHERE code = $1 OR name ILIKE $1 LIMIT 1', [projectId]);
-      if (pRes.rows.length > 0) resolvedProjectId = pRes.rows[0].id;
-      else return res.status(400).json({ error: 'Selected project was not found.' });
+
+      userResult =
+        await pool.query(
+          `
+          SELECT
+            id,
+            full_name,
+            email,
+            role
+
+          FROM users
+
+          WHERE
+            (
+              full_name ILIKE $1
+              OR email ILIKE $1
+            )
+
+            AND is_active = TRUE
+
+          LIMIT 1
+          `,
+          [
+            assigneeId
+          ]
+        );
     }
 
-    // Resolve assigneeId if passed as user name or email
-    let resolvedAssigneeId = null;
-    const isUserUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(assigneeId);
-    if (isUserUuid) {
-      resolvedAssigneeId = assigneeId;
-    } else {
-      const uRes = await pool.query('SELECT id FROM users WHERE full_name ILIKE $1 OR email ILIKE $1 LIMIT 1', [assigneeId]);
-      if (uRes.rows.length > 0) resolvedAssigneeId = uRes.rows[0].id;
-      else return res.status(400).json({ error: 'Selected assignee engineer was not found.' });
+
+    if (
+      userResult.rows.length === 0
+    ) {
+
+      return res.status(400).json({
+        success: false,
+        error:
+          'Selected assignee engineer was not found.'
+      });
     }
 
-    const result = await pool.query(
-      `INSERT INTO tasks
-         (title, task_name, description, phase, assignee_id, due_date, priority,
-          manpower_needed, materials_required, site_instructions,
-          project_id, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'Pending')
-       RETURNING *`,
-      [taskName, taskName, siteInstructions, phase, resolvedAssigneeId, dueDate, priority,
-       manpowerNeeded, materialsRequired, siteInstructions, resolvedProjectId]
-    );
-    console.log('[ROUTE] POST /tasks → created task id:', result.rows[0].id);
-    res.status(201).json({ success: true, data: result.rows[0] });
+
+    const assignee =
+      userResult.rows[0];
+
+
+    // ============================================================
+    // ASSIGNEE MUST BELONG TO PROJECT
+    //
+    // Prevent assigning a task to somebody from another project.
+    // ============================================================
+
+    const membership =
+      await pool.query(
+        `
+        SELECT id
+
+        FROM project_members
+
+        WHERE project_id = $1
+          AND user_id = $2::uuid
+
+        LIMIT 1
+        `,
+        [
+          project.code,
+          assignee.id
+        ]
+      );
+
+
+    if (
+      membership.rows.length === 0
+    ) {
+
+      return res.status(400).json({
+        success: false,
+        error:
+          `${assignee.full_name || assignee.email} is not a member of this project.`
+      });
+    }
+
+
+    // ============================================================
+    // CREATE TASK
+    // ============================================================
+
+    const result =
+      await pool.query(
+        `
+        INSERT INTO tasks
+        (
+          task_name,
+
+          phase,
+
+          assignee_id,
+
+          due_date,
+
+          priority,
+
+          manpower_needed,
+
+          materials_required,
+
+          site_instructions,
+
+          project_id,
+
+          status
+        )
+
+        VALUES
+        (
+          $1,
+          $2,
+          $3,
+          $4,
+          $5,
+          $6,
+          $7,
+          $8,
+          $9,
+          'Pending'
+        )
+
+        RETURNING *
+        `,
+        [
+          taskName,
+
+          phase,
+
+          assignee.id,
+
+          dueDate,
+
+          priority,
+
+          manpowerNeeded,
+
+          materialsRequired,
+
+          siteInstructions,
+
+          resolvedProjectId
+        ]
+      );
+
+
+    return res.status(201).json({
+
+      success: true,
+
+      message:
+        'Task created successfully.',
+
+      data:
+        result.rows[0]
+
+    });
+
+
   } catch (err) {
-    console.error('[ROUTE] POST /tasks ERROR:', err);
-    res.status(500).json({ error: 'Failed to create task.' });
+
+    console.error('======================================');
+    console.error('❌ CREATE TASK ERROR');
+    console.error('MESSAGE:', err.message);
+    console.error('CODE:', err.code);
+    console.error('USER:', req.user);
+    console.error('======================================');
+
+
+    return res.status(500).json({
+
+      success: false,
+
+      error:
+        'Failed to create task.',
+
+      details:
+        err.message
+
+    });
   }
 };
-
 // ─── ASSIGN TASK ──────────────────────────────────────────────────────────────
-exports.assignTask = async function(req, res) {
-  const id = req.params.id;
-  const { assigneeId } = req.body;
-  console.log('[ROUTE] PATCH /tasks/' + id + '/assign → assigneeId:', assigneeId);
+exports.assignTask = async function (
+  req,
+  res
+) {
 
-  if (!assigneeId) {
-    return res.status(400).json({ error: 'assigneeId is required.' });
+  if (!requireAuth(req, res)) {
+    return;
   }
 
+
+  const id =
+    req.params.id;
+
+
+  const {
+    assigneeId
+  } = req.body;
+
+
+  if (!assigneeId) {
+
+    return res.status(400).json({
+      success: false,
+      error:
+        'assigneeId is required.'
+    });
+  }
+
+
   try {
-    // Verify user exists
-    const userResult = await pool.query(
-      'SELECT id, full_name FROM users WHERE id = $1 AND is_active = TRUE',
-      [assigneeId]
-    );
-    if (userResult.rows.length === 0) {
-      return res.status(404).json({ error: 'User not found.' });
+
+    // ============================================================
+    // CHECK TASK ACCESS
+    // ============================================================
+
+    const task =
+      await getAccessibleTask(
+        id,
+        req.user.id
+      );
+
+
+    if (!task) {
+
+      return res.status(404).json({
+        success: false,
+        error:
+          'Task not found or you do not have access.'
+      });
     }
 
-    const result = await pool.query(
-      `UPDATE tasks SET assignee_id = $1, updated_at = NOW() WHERE id = $2
-       RETURNING *`,
-      [assigneeId, id]
-    );
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Task not found.' });
+
+    // ============================================================
+    // CHECK USER
+    // ============================================================
+
+    const userResult =
+      await pool.query(
+        `
+        SELECT
+          id,
+          full_name,
+          email
+
+        FROM users
+
+        WHERE id = $1::uuid
+          AND is_active = TRUE
+
+        LIMIT 1
+        `,
+        [
+          assigneeId
+        ]
+      );
+
+
+    if (
+      userResult.rows.length === 0
+    ) {
+
+      return res.status(404).json({
+        success: false,
+        error:
+          'User not found.'
+      });
     }
 
-    console.log('[ROUTE] PATCH /tasks/' + id + '/assign → assigned to:', userResult.rows[0].full_name);
-    res.json({ success: true, data: result.rows[0] });
+
+    // ============================================================
+    // USER MUST BELONG TO TASK PROJECT
+    // ============================================================
+
+    const membership =
+      await pool.query(
+        `
+        SELECT id
+
+        FROM project_members
+
+        WHERE project_id = $1
+          AND user_id = $2::uuid
+
+        LIMIT 1
+        `,
+        [
+          task.project_code,
+          assigneeId
+        ]
+      );
+
+
+    if (
+      membership.rows.length === 0
+    ) {
+
+      return res.status(400).json({
+        success: false,
+        error:
+          'Selected user is not a member of this project.'
+      });
+    }
+
+
+    // ============================================================
+    // ASSIGN
+    // ============================================================
+
+    const result =
+      await pool.query(
+        `
+        UPDATE tasks
+
+        SET
+          assignee_id = $1::uuid,
+          updated_at = NOW()
+
+        WHERE id = $2::uuid
+
+        RETURNING *
+        `,
+        [
+          assigneeId,
+          id
+        ]
+      );
+
+
+    return res.status(200).json({
+
+      success: true,
+
+      data:
+        result.rows[0]
+
+    });
+
+
   } catch (err) {
-    console.error('[ROUTE] PATCH /tasks/:id/assign ERROR:', err);
-    res.status(500).json({ error: 'Failed to assign task.' });
+
+    console.error(
+      'assignTask error:',
+      err
+    );
+
+
+    return res.status(500).json({
+      success: false,
+      error:
+        'Failed to assign task.',
+      details:
+        err.message
+    });
   }
 };
 
@@ -693,6 +1770,20 @@ exports.uploadTaskImages = async function(req, res) {
   console.log('  req.file :', req.file ? req.file.originalname : 'none');
 
   try {
+    const taskAccess =
+  await getAccessibleTask(
+    taskId,
+    req.user.id
+  );
+
+if (!taskAccess) {
+
+  return res.status(404).json({
+    success: false,
+    message:
+      'Task not found or you do not have access.'
+  });
+}
     const date = new Date().toISOString().split('T')[0];
 
     var files = [];
