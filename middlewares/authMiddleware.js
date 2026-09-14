@@ -36,11 +36,45 @@ const verifyToken = (req, res, next) => {
  * Middleware that restricts access to admin users only.
  * Must be used AFTER verifyToken.
  */
-const requireAdmin = (req, res, next) => {
-  if (!req.user || req.user.role !== 'Admin') {
-    return res.status(403).json({ error: 'Admin access required.' });
+const requireAdmin = async (req, res, next) => {
+  const role = req.user?.role?.trim().toLowerCase();
+
+  // 1. Direct check from decoded JWT token
+  if (role === 'admin' || role === 'owner') {
+    return next();
   }
-  next();
+
+  // 2. Fallback check from database in case role capitalization differs or user owns projects
+  const userId = req.user?.id || req.user?.user_id;
+  if (userId) {
+    try {
+      const pool = require('../db');
+      const userRes = await pool.query(
+        'SELECT role FROM users WHERE id = $1 AND is_active = TRUE',
+        [userId]
+      );
+      if (userRes.rows.length > 0) {
+        const dbRole = userRes.rows[0].role?.trim().toLowerCase();
+        if (dbRole === 'admin' || dbRole === 'owner') {
+          return next();
+        }
+      }
+
+      // Check if user is owner of any project
+      const ownerRes = await pool.query(
+        'SELECT id FROM projects WHERE owner_id = $1 LIMIT 1',
+        [userId]
+      );
+      if (ownerRes.rows.length > 0) {
+        return next();
+      }
+    } catch (err) {
+      console.error('requireAdmin fallback check error:', err);
+    }
+  }
+
+  return res.status(403).json({ error: 'Admin access required.' });
 };
 
 module.exports = { verifyToken, requireAdmin };
+

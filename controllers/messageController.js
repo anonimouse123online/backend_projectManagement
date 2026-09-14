@@ -351,7 +351,7 @@ exports.getMessages = async (req, res) => {
         u.full_name AS sender_name,
 
         CASE
-          WHEN m.sender_id = $2::uuid
+          WHEN m.sender_id::text = $2::text
           THEN TRUE
           ELSE FALSE
         END AS is_mine

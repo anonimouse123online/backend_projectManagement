@@ -1,16 +1,62 @@
   // controllers/dashboardController.js
 const pool = require('../db');
 
+// Helper: Build a subquery that returns project IDs visible to a given user
+function ownedProjectFilter(userId, paramIndex) {
+  return `(
+    owner_id = $${paramIndex}
+    OR code IN (SELECT pm.project_id FROM project_members pm WHERE pm.user_id = $${paramIndex})
+    OR id::text IN (SELECT pm.project_id FROM project_members pm WHERE pm.user_id = $${paramIndex})
+  )`;
+}
+
 // ─── STATS (Live Dynamic Aggregation) ──────────────────────
 exports.getStats = async (req, res) => {
   try {
     const { range } = req.query;
+    const userId = req.user?.id || null;
+
+    let projQuery, taskQuery, issueQuery, userQuery;
+    const projParams = [];
+    const taskParams = [];
+    const issueParams = [];
+    const userParams = [];
+
+    if (userId) {
+      projParams.push(userId);
+      projQuery = `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE status = 'Ongoing' OR status = 'Planning') AS active FROM projects WHERE ${ownedProjectFilter(userId, 1)}`;
+
+      taskParams.push(userId);
+      taskQuery = `SELECT COUNT(*) AS total FROM tasks WHERE project_id IN (SELECT id FROM projects WHERE ${ownedProjectFilter(userId, 1)})`;
+
+      issueParams.push(userId);
+      issueQuery = `SELECT COUNT(*) AS total FROM project_issues WHERE status != 'Resolved' AND project_code IN (SELECT code FROM projects WHERE ${ownedProjectFilter(userId, 1)})`;
+
+      userParams.push(userId);
+      userQuery = `
+        SELECT COUNT(DISTINCT u.id) AS total
+        FROM users u
+        JOIN project_members pm ON (pm.user_id = u.id OR LOWER(TRIM(pm.user_id)) = LOWER(TRIM(u.email)))
+        JOIN projects p ON (p.code = pm.project_id OR p.id::text = pm.project_id)
+        WHERE (
+          p.owner_id = $1
+          OR p.code IN (SELECT pm2.project_id FROM project_members pm2 WHERE pm2.user_id = $1)
+          OR p.id::text IN (SELECT pm2.project_id FROM project_members pm2 WHERE pm2.user_id = $1)
+        )
+        AND u.is_active = TRUE
+      `;
+    } else {
+      projQuery = "SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE status = 'Ongoing' OR status = 'Planning') AS active FROM projects";
+      taskQuery = "SELECT COUNT(*) AS total FROM tasks";
+      issueQuery = "SELECT COUNT(*) AS total FROM project_issues WHERE status != 'Resolved'";
+      userQuery = "SELECT COUNT(*) AS total FROM users WHERE is_active = TRUE";
+    }
 
     const [projRes, taskRes, userRes, issueRes] = await Promise.all([
-      pool.query("SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE status = 'Ongoing' OR status = 'Planning') AS active FROM projects"),
-      pool.query("SELECT COUNT(*) AS total FROM tasks"),
-      pool.query("SELECT COUNT(*) AS total FROM users"),
-      pool.query("SELECT COUNT(*) AS total FROM project_issues WHERE status != 'Resolved'"),
+      pool.query(projQuery, projParams),
+      pool.query(taskQuery, taskParams),
+      pool.query(userQuery, userParams),
+      pool.query(issueQuery, issueParams),
     ]);
 
     const activeProjects = parseInt(projRes.rows[0]?.active ?? projRes.rows[0]?.total ?? 0);
@@ -26,7 +72,7 @@ exports.getStats = async (req, res) => {
         up: activeProjects > 0,
         bg: '#EFF6FF',
         clr: '#3B82F6',
-        icon: '📋'
+        icon: 'FolderClosed'
       },
       {
         label: 'Total Tasks',
@@ -35,7 +81,7 @@ exports.getStats = async (req, res) => {
         up: totalTasks > 0,
         bg: '#F0FDF4',
         clr: '#22C55E',
-        icon: '✅'
+        icon: 'CheckSquare'
       },
       {
         label: 'Team Members',
@@ -44,7 +90,7 @@ exports.getStats = async (req, res) => {
         up: teamMembers > 0,
         bg: '#FFFBEB',
         clr: '#F59E0B',
-        icon: '👥'
+        icon: 'Users'
       },
       {
         label: 'Issues Reported',
@@ -53,7 +99,7 @@ exports.getStats = async (req, res) => {
         up: false,
         bg: '#FEF2F2',
         clr: '#EF4444',
-        icon: '⚠️'
+        icon: 'AlertTriangle'
       }
     ];
 
@@ -68,8 +114,15 @@ exports.getStats = async (req, res) => {
 exports.getProjects = async (req, res) => {
   try {
     const { project, pm, status, search } = req.query;
+    const userId = req.user?.id || null;
     const conditions = [];
     const params = [];
+
+    // OWNER / MEMBER ISOLATION
+    if (userId) {
+      params.push(userId);
+      conditions.push(ownedProjectFilter(userId, params.length));
+    }
 
     if (project && project !== 'All') {
       params.push(project);
@@ -101,13 +154,52 @@ exports.getProjects = async (req, res) => {
          client AS pm,
          TO_CHAR(end_date, 'Mon DD, YYYY') AS date,
          status,
-         COALESCE(phase, '—') AS prog
+         COALESCE(
+           (
+             SELECT ROUND(AVG(
+               COALESCE(
+                 t.progress_pct,
+                 CASE
+                   WHEN t.status ILIKE 'completed' THEN 100
+                   WHEN t.status ILIKE 'in%progress' OR t.status ILIKE 'ongoing' THEN 50
+                   ELSE 0
+                 END
+               )
+             ))
+             FROM tasks t
+             WHERE t.project_id::text = projects.id::text OR t.project_id::text = projects.code
+           ),
+           COALESCE(projects.progress_pct, 0)
+         )::int AS progress_pct,
+         COALESCE(
+           (
+             SELECT COUNT(*)
+             FROM tasks t
+             WHERE (t.project_id::text = projects.id::text OR t.project_id::text = projects.code)
+               AND t.status ILIKE 'completed'
+           ),
+           0
+         )::int AS completed_tasks,
+         COALESCE(
+           (
+             SELECT COUNT(*)
+             FROM tasks t
+             WHERE (t.project_id::text = projects.id::text OR t.project_id::text = projects.code)
+           ),
+           0
+         )::int AS total_tasks
        FROM projects
        ${where}
        ORDER BY created_at DESC`,
       params
     );
-    res.json({ success: true, data: rows });
+
+    const formattedRows = rows.map(r => ({
+      ...r,
+      prog: `${r.progress_pct || 0}%`
+    }));
+
+    res.json({ success: true, data: formattedRows });
   } catch (err) {
     console.error('getProjects error:', err);
     res.status(500).json({ error: 'Failed to fetch projects.' });
@@ -184,8 +276,15 @@ exports.getNotes = async (req, res) => {
 exports.getGaugeStats = async (req, res) => {
   try {
     const { category } = req.query;
+    const userId = req.user?.id || null;
     const taskConditions = [];
     const taskParams = [];
+
+    // Scope to user's projects
+    if (userId) {
+      taskParams.push(userId);
+      taskConditions.push(`project_id IN (SELECT id FROM projects WHERE ${ownedProjectFilter(userId, taskParams.length)})`);
+    }
 
     if (category && category !== 'All') {
       taskParams.push(`%${category}%`);
@@ -225,8 +324,15 @@ exports.getGaugeStats = async (req, res) => {
 exports.getOverallProgress = async (req, res) => {
   try {
     const { category } = req.query;
+    const userId = req.user?.id || null;
     const taskConditions = [];
     const taskParams = [];
+
+    // Scope to user's projects
+    if (userId) {
+      taskParams.push(userId);
+      taskConditions.push(`project_id IN (SELECT id FROM projects WHERE ${ownedProjectFilter(userId, taskParams.length)})`);
+    }
 
     if (category && category !== 'All') {
       taskParams.push(`%${category}%`);
@@ -250,7 +356,14 @@ exports.getOverallProgress = async (req, res) => {
     const totalNum = parseInt(total) || 0;
     const percentage = parseInt(weighted_progress) || 0;
 
-    // Also compute project-level stats
+    // Also compute project-level stats (scoped to user)
+    const projParams = [];
+    let projWhere = '';
+    if (userId) {
+      projParams.push(userId);
+      projWhere = `WHERE ${ownedProjectFilter(userId, 1)}`;
+    }
+
     const projectStats = await pool.query(`
       SELECT
         COUNT(*)                                      AS total,
@@ -259,7 +372,8 @@ exports.getOverallProgress = async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'Planning')   AS planning,
         COALESCE(ROUND(AVG(COALESCE(progress_pct, 0))), 0) AS avg_proj_progress
       FROM projects
-    `);
+      ${projWhere}
+    `, projParams);
 
     const projects = projectStats.rows[0];
 

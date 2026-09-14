@@ -3,8 +3,20 @@ const pool = require('../db');
 exports.getResources = async (req, res) => {
   try {
     const { category, status, project, search } = req.query;
+    const userId = req.user?.id || null;
     const conditions = [];
     const params = [];
+
+    // OWNER / MEMBER ISOLATION
+    // Only show resources for projects the user owns or is a member of
+    if (userId) {
+      params.push(userId);
+      conditions.push(`(
+        project IN (SELECT name FROM projects WHERE owner_id = $${params.length} OR code IN (SELECT pm.project_id FROM project_members pm WHERE pm.user_id = $${params.length}) OR id::text IN (SELECT pm.project_id FROM project_members pm WHERE pm.user_id = $${params.length}))
+        OR project IN (SELECT code FROM projects WHERE owner_id = $${params.length} OR code IN (SELECT pm.project_id FROM project_members pm WHERE pm.user_id = $${params.length}) OR id::text IN (SELECT pm.project_id FROM project_members pm WHERE pm.user_id = $${params.length}))
+        OR project IS NULL OR project = ''
+      )`);
+    }
 
     if (category && category !== 'All Resources' && category !== 'All Categories') {
       params.push(category);
@@ -18,7 +30,7 @@ exports.getResources = async (req, res) => {
 
     if (project && project !== 'All Projects') {
       params.push(project);
-      conditions.push(`project ILIKE $${params.length}`);
+      conditions.push(`(project ILIKE $${params.length} OR project IN (SELECT code FROM projects WHERE name ILIKE $${params.length}) OR project IN (SELECT name FROM projects WHERE code ILIKE $${params.length}))`);
     }
 
     if (search) {

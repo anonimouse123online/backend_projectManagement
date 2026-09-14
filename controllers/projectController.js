@@ -11,7 +11,8 @@ const generateInviteCode = () => {
 const getAllProjects = async (req, res) => {
   try {
     const { status, search, code } = req.query;
-    const projects = await projectService.getAll(status, search, code);
+    const userId = req.user?.id || null;
+    const projects = await projectService.getAll(status, search, code, userId);
     res.json({ success: true, data: projects });
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch projects', error: error.message });
@@ -21,8 +22,9 @@ const getAllProjects = async (req, res) => {
 const getProjectByCode = async (req, res) => {
   try {
     const { code } = req.params;
-    const project = await projectService.getByCode(code);
-    if (!project) return res.status(404).json({ message: `Project ${code} not found.` });
+    const userId = req.user?.id || null;
+    const project = await projectService.getByCode(code, userId);
+    if (!project) return res.status(404).json({ message: `Project ${code} not found or access denied.` });
     res.json({ success: true, data: project });
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch project', error: error.message });
@@ -33,10 +35,24 @@ const updateProjectStatus = async (req, res) => {
   try {
     const { code } = req.params;
     const { status } = req.body;
+    const userId = req.user?.id || null;
 
     const allowed = ['Planning', 'Ongoing', 'Completed'];
     if (!allowed.includes(status)) {
       return res.status(400).json({ message: `Invalid status. Must be one of: ${allowed.join(', ')}` });
+    }
+
+    // Verify ownership/membership before updating
+    const accessCheck = await pool.query(
+      `SELECT id FROM projects WHERE code = $1 AND (
+        owner_id = $2
+        OR code IN (SELECT project_id FROM project_members WHERE user_id = $2)
+        OR id::text IN (SELECT project_id FROM project_members WHERE user_id = $2)
+      )`,
+      [code, userId]
+    );
+    if (accessCheck.rows.length === 0) {
+      return res.status(404).json({ message: `Project ${code} not found or access denied.` });
     }
 
     const { rows } = await pool.query(
@@ -58,23 +74,41 @@ const updateProjectStatus = async (req, res) => {
 const createProject = async (req, res) => {
   try {
     const { code, name, location, scope, client, budget, start_date, end_date, phase } = req.body;
+    const userId = req.user?.id || null;
 
     if (!code || !name || !location || !scope || !client || !budget || !start_date || !end_date || !phase) {
       return res.status(400).json({ message: 'All fields are required.' });
     }
 
+    // Create project with owner_id set to the current user
     const { rows } = await pool.query(
       `INSERT INTO projects
-        (code, project_code, name, location, scope, client, budget, start_date, end_date, phase, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'Planning')
+        (code, project_code, name, location, scope, client, budget, start_date, end_date, phase, status, owner_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'Planning', $11)
        RETURNING
-         id, code, name, location, scope, client, budget, phase, status,
+         id, code, name, location, scope, client, budget, phase, status, owner_id,
          TO_CHAR(start_date, 'YYYY-MM-DD') AS start_date,
          TO_CHAR(end_date,   'YYYY-MM-DD') AS end_date`,
-      [code, code, name, location, scope, client, budget, start_date, end_date, phase]
+      [code, code, name, location, scope, client, budget, start_date, end_date, phase, userId]
     );
 
-    res.status(201).json({ success: true, data: rows[0] });
+    const newProject = rows[0];
+
+    // Auto-add creator as Owner in project_members
+    if (userId) {
+      try {
+        await pool.query(
+          `INSERT INTO project_members (project_id, user_id, role)
+           VALUES ($1, $2, 'Owner')
+           ON CONFLICT DO NOTHING`,
+          [newProject.code, userId]
+        );
+      } catch (memberErr) {
+        console.warn('Could not auto-add creator to project_members:', memberErr.message);
+      }
+    }
+
+    res.status(201).json({ success: true, data: newProject });
   } catch (err) {
     if (err.code === '23505') {
       return res.status(409).json({ message: `Project code "${req.body.code}" already exists.` });
@@ -159,15 +193,14 @@ const joinProject = async (req, res) => {
 
     // ============================================================
     // CHECK IF USER ALREADY JOINED
-    // project_members uses user_name instead of user_id
     // ============================================================
 
     const already = await pool.query(
       `
       SELECT id
       FROM project_members
-      WHERE project_id = $1
-        AND user_name = $2
+      WHERE (project_id = $1 OR project_id = (SELECT id::text FROM projects WHERE code = $1 LIMIT 1))
+        AND (user_id = $2 OR user_id = (SELECT id FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM($2)) LIMIT 1))
       `,
       [
         invite.project_id,
@@ -190,10 +223,14 @@ const joinProject = async (req, res) => {
       `
       INSERT INTO project_members (
         project_id,
-        user_name,
+        user_id,
         role
       )
-      VALUES ($1, $2, 'Member')
+      VALUES (
+        $1,
+        COALESCE((SELECT id FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM($2)) LIMIT 1), $2),
+        'Member'
+      )
       `,
       [
         invite.project_id,
@@ -316,10 +353,10 @@ const getJoinedProjects = async (req, res) => {
       FROM project_members pm
 
       INNER JOIN projects p
-        ON p.code = pm.project_id
+        ON (p.code = pm.project_id OR p.id::text = pm.project_id)
 
-      WHERE LOWER(TRIM(pm.user_name))
-        = LOWER(TRIM($1))
+      WHERE pm.user_id = (SELECT id FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM($1)) LIMIT 1)
+         OR LOWER(TRIM(pm.user_id)) = LOWER(TRIM($1))
 
       ORDER BY pm.joined_at DESC
       `,
@@ -361,26 +398,35 @@ const getAvailableMembers = async (req, res) => {
 
   try {
     const project = await pool.query(
-      'SELECT id FROM projects WHERE code = $1',
+      'SELECT id, code FROM projects WHERE code = $1',
       [code]
     );
     if (project.rows.length === 0)
       return res.status(404).json({ message: `Project ${code} not found.` });
 
     const { rows } = await pool.query(
-      `SELECT u.id, u.full_name AS name, u.email, u.role
+      `SELECT u.id, COALESCE(NULLIF(TRIM(u.full_name), ''), u.name, u.email) AS name, u.email, u.role
        FROM users u
        WHERE u.id NOT IN (
          SELECT pm.user_id
          FROM project_members pm
-         WHERE pm.project_id = $1
+         WHERE pm.project_id::text = $1
+            OR pm.project_id::text = (SELECT id::text FROM projects WHERE code = $1 LIMIT 1)
        )
-       AND u.is_active = TRUE`,
+       AND LOWER(TRIM(u.email)) NOT IN (
+         SELECT LOWER(TRIM(pm.user_id))
+         FROM project_members pm
+         WHERE pm.project_id::text = $1
+            OR pm.project_id::text = (SELECT id::text FROM projects WHERE code = $1 LIMIT 1)
+       )
+       AND u.is_active = TRUE
+       ORDER BY u.full_name ASC`,
       [code]
     );
 
     res.json({ success: true, data: rows });
   } catch (err) {
+    console.error('getAvailableMembers error:', err);
     res.status(500).json({ message: 'Failed to fetch available members', error: err.message });
   }
 };
@@ -388,40 +434,46 @@ const getAvailableMembers = async (req, res) => {
 // POST /projects/:code/members
 const addMember = async (req, res) => {
   const { code } = req.params;
-  const { userId } = req.body;
+  const { userId, role } = req.body;
 
   if (!userId) return res.status(400).json({ message: 'userId is required' });
 
   try {
     const userRes = await pool.query(
-      'SELECT id, full_name FROM users WHERE id = $1',
+      'SELECT id, full_name, email, role FROM users WHERE id = $1',
       [userId]
     );
     if (userRes.rows.length === 0)
       return res.status(404).json({ message: 'User not found.' });
 
     const projectRes = await pool.query(
-      'SELECT id FROM projects WHERE code = $1',
+      'SELECT id, code FROM projects WHERE code = $1',
       [code]
     );
     if (projectRes.rows.length === 0)
       return res.status(404).json({ message: `Project ${code} not found.` });
 
     const already = await pool.query(
-      'SELECT id FROM project_members WHERE project_id = $1 AND user_id = $2',
-      [code, userId]
+      `SELECT id FROM project_members
+       WHERE (project_id = $1 OR project_id = (SELECT id::text FROM projects WHERE code = $1 LIMIT 1))
+         AND (user_id = $2 OR user_id = $3)`,
+      [code, userId, userRes.rows[0].email]
     );
     if (already.rows.length > 0)
       return res.status(409).json({ message: 'User is already a member of this project.' });
 
+    const memberRole = role || userRes.rows[0].role || 'Member';
+
     await pool.query(
       `INSERT INTO project_members (project_id, user_id, role)
-       VALUES ($1, $2, 'Member')`,
-      [code, userId]
+       VALUES ($1, $2, $3)`,
+      [code, userId, memberRole]
     );
 
-    res.json({ success: true, message: `${userRes.rows[0].full_name} added to project ${code}.` });
+    const userName = userRes.rows[0].full_name || userRes.rows[0].email;
+    res.json({ success: true, message: `${userName} added to project ${code}.` });
   } catch (err) {
+    console.error('addMember error:', err);
     res.status(500).json({ message: 'Failed to add member', error: err.message });
   }
 };
@@ -477,10 +529,11 @@ const getProjectMembers = async (req, res) => {
       FROM project_members pm
 
       INNER JOIN users u
-        ON LOWER(TRIM(u.email))
-         = LOWER(TRIM(pm.user_name))
+        ON (u.id = pm.user_id OR LOWER(TRIM(u.email)) = LOWER(TRIM(pm.user_id)))
 
-      WHERE pm.project_id::text = $1
+      WHERE (pm.project_id::text = $1
+         OR pm.project_id::text = (SELECT id::text FROM projects WHERE code = $1 LIMIT 1))
+        AND u.is_active = TRUE
 
       ORDER BY pm.joined_at ASC
       `,
@@ -519,7 +572,8 @@ const removeMember = async (req, res) => {
   try {
     const { rows } = await pool.query(
       `DELETE FROM project_members
-       WHERE project_id = $1 AND user_id = $2
+       WHERE (project_id = $1 OR project_id = (SELECT id::text FROM projects WHERE code = $1 LIMIT 1))
+         AND (user_id = $2 OR user_id IN (SELECT email FROM users WHERE id = $2))
        RETURNING id`,
       [code, memberId]
     );
@@ -866,14 +920,16 @@ const deleteDocument = async (req, res) => {
 // DELETE /projects/:code
 const deleteProject = async (req, res) => {
   const { code } = req.params;
+  const userId = req.user?.id || null;
 
   try {
+    // Only the owner can delete a project
     const { rows } = await pool.query(
-      'DELETE FROM projects WHERE code = $1 RETURNING id, code, name',
-      [code]
+      `DELETE FROM projects WHERE code = $1 AND owner_id = $2 RETURNING id, code, name`,
+      [code, userId]
     );
     if (rows.length === 0) {
-      return res.status(404).json({ message: `Project ${code} not found.` });
+      return res.status(404).json({ message: `Project ${code} not found or access denied.` });
     }
 
     res.json({ success: true, message: `Project "${rows[0].name}" deleted.` });
@@ -1039,11 +1095,11 @@ const getProjectProgress = async (req, res) => {
 };
 
 const CONSTRUCTION_PHASES = [
-  'Phase 1 - Foundation',
-  'Phase 2 - Structural',
-  'Phase 3 - Electrical & Utilities',
-  'Phase 4 - Plumbing & MEP',
-  'Phase 5 - Finishing',
+  'Foundation',
+  'Structural',
+  'Electrical & Utilities',
+  'Plumbing & MEP',
+  'Finishing',
 ];
 
 function getNextPhase(currentPhase) {
@@ -1052,11 +1108,11 @@ function getNextPhase(currentPhase) {
   const idx = CONSTRUCTION_PHASES.findIndex(p => {
     const pLower = p.toLowerCase();
     return pLower.includes(curLower) || curLower.includes(pLower) ||
-      (pLower.includes('phase 1') && curLower.includes('foundation')) ||
-      (pLower.includes('phase 2') && (curLower.includes('structur') || curLower.includes('structure'))) ||
-      (pLower.includes('phase 3') && (curLower.includes('utilit') || curLower.includes('electr'))) ||
-      (pLower.includes('phase 4') && (curLower.includes('plumb') || curLower.includes('mep'))) ||
-      (pLower.includes('phase 5') && curLower.includes('finish'));
+      ((curLower.includes('phase 1') || curLower.includes('foundation')) && p === 'Foundation') ||
+      ((curLower.includes('phase 2') || curLower.includes('structur') || curLower.includes('structure')) && p === 'Structural') ||
+      ((curLower.includes('phase 3') || curLower.includes('utilit') || curLower.includes('electr')) && p === 'Electrical & Utilities') ||
+      ((curLower.includes('phase 4') || curLower.includes('plumb') || curLower.includes('mep')) && p === 'Plumbing & MEP') ||
+      ((curLower.includes('phase 5') || curLower.includes('finish')) && p === 'Finishing');
   });
 
   if (idx !== -1 && idx < CONSTRUCTION_PHASES.length - 1) {

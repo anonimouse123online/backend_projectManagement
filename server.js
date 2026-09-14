@@ -45,19 +45,32 @@ app.use(
 // CORS
 // ============================================================
 
-const corsOrigin =
-  process.env.CORS_ORIGIN ||
-  'http://localhost:5173';
+const configuredOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173,http://localhost:5174')
+  .split(',')
+  .map((o) => o.trim());
 
 app.use(
   cors({
-    origin: corsOrigin,
+    origin: function (origin, callback) {
+      // Allow requests with no origin (e.g. mobile apps, curl, server-to-server)
+      if (!origin) return callback(null, true);
+
+      // Allow any localhost or 127.0.0.1 port (5173, 5174, etc.)
+      const isLocalhost = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+      if (isLocalhost || configuredOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(null, true);
+    },
+    credentials: true,
     methods: [
       'GET',
       'POST',
       'PUT',
       'PATCH',
       'DELETE',
+      'OPTIONS',
     ],
     allowedHeaders: [
       'Content-Type',

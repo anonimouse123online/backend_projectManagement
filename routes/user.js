@@ -206,4 +206,47 @@ router.patch(
 );
 
 
+// ============================================================
+// ============================================================
+// REMOVE USER FROM MY PROJECTS
+//
+// DELETE /users/:id
+// Admin only
+// Removes the user from project_members of projects owned
+// by the requesting admin (preserves the user's account).
+// ============================================================
+
+router.delete(
+  '/:id',
+  requireAdmin,
+  async (req, res) => {
+    const { id } = req.params;
+    const adminId = req.user?.id || req.user?.user_id;
+
+    try {
+      if (id === adminId) {
+        return res.status(400).json({ error: 'You cannot remove your own account from your projects.' });
+      }
+
+      // 1. Remove from all project_members belonging to projects the admin owns
+      await pool.query(
+        `DELETE FROM project_members 
+         WHERE (user_id = $1 OR user_id IN (SELECT email FROM users WHERE id = $1))
+           AND project_id IN (
+             SELECT code FROM projects WHERE owner_id = $2
+             UNION
+             SELECT id::text FROM projects WHERE owner_id = $2
+           )`,
+        [id, adminId]
+      );
+
+      res.json({ success: true, message: 'User removed from your projects successfully.' });
+    } catch (err) {
+      console.error('removeUserFromProjects error:', err);
+      res.status(500).json({ error: 'Failed to remove user from projects.' });
+    }
+  }
+);
+
+
 module.exports = router;

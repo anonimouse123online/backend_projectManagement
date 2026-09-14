@@ -14,17 +14,19 @@ exports.getNotifications = async (req, res) => {
       SELECT
         n.id,
         n.title,
-        n.message,
-        n.audience,
-        n.created_by,
+        n.body AS message,
+        n.type AS audience,
+        n.user_id AS created_by,
         n.created_at,
+        n.read,
+        n.link,
 
         u.full_name AS sender_name
 
       FROM notifications n
 
       LEFT JOIN users u
-        ON u.id = n.created_by
+        ON u.id = n.user_id
 
       ORDER BY n.created_at DESC
     `;
@@ -149,12 +151,17 @@ exports.createNotification = async (req, res) => {
     // INSERT NOTIFICATION INTO POSTGRESQL
     // ========================================================
 
+    // The DB 'type' column has a CHECK constraint:
+    // task, message, weather, file, project, member, deadline
+    // Admin-sent broadcast notifications use type 'message'
+    const dbType = 'message';
+
     const query = `
       INSERT INTO notifications (
         title,
-        message,
-        audience,
-        created_by
+        body,
+        type,
+        user_id
       )
 
       VALUES ($1, $2, $3, $4)
@@ -162,9 +169,9 @@ exports.createNotification = async (req, res) => {
       RETURNING
         id,
         title,
-        message,
-        audience,
-        created_by,
+        body AS message,
+        type AS audience,
+        user_id AS created_by,
         created_at
     `;
 
@@ -172,7 +179,7 @@ exports.createNotification = async (req, res) => {
     const values = [
       title.trim(),
       message.trim(),
-      selectedAudience,
+      dbType,
       userId
     ];
 
@@ -189,64 +196,52 @@ exports.createNotification = async (req, res) => {
 
 
     // ========================================================
-    // DETERMINE FIREBASE TOPIC
+    // SEND FIREBASE PUSH NOTIFICATION (if available)
     // ========================================================
 
-    let topic;
+    let firebaseResponse = null;
 
+    if (messaging) {
+      try {
+        let topic;
 
-    if (selectedAudience === 'engineer') {
+        if (selectedAudience === 'engineer') {
+          topic = 'engineers';
+        } else {
+          topic = 'all_users';
+        }
 
-      topic = 'engineers';
+        const firebaseMessage = {
+          notification: {
+            title: notification.title,
+            body: notification.message
+          },
+          data: {
+            notificationId: String(notification.id),
+            audience: notification.audience,
+            type: 'admin_notification'
+          },
+          topic: topic
+        };
 
+        firebaseResponse =
+          await messaging.send(firebaseMessage);
+
+        console.log(
+          'Firebase notification sent:',
+          firebaseResponse
+        );
+      } catch (fbErr) {
+        console.warn(
+          'Firebase push failed (notification still saved):',
+          fbErr.message
+        );
+      }
     } else {
-
-      topic = 'all_users';
+      console.log(
+        'Firebase messaging not available — notification saved to DB only.'
+      );
     }
-
-
-    // ========================================================
-    // SEND FIREBASE PUSH NOTIFICATION
-    // ========================================================
-
-    const firebaseMessage = {
-
-      notification: {
-
-        title:
-          notification.title,
-
-        body:
-          notification.message
-      },
-
-
-      data: {
-
-        notificationId:
-          String(notification.id),
-
-        audience:
-          notification.audience,
-
-        type:
-          'admin_notification'
-      },
-
-
-      topic:
-        topic
-    };
-
-
-    const firebaseResponse =
-    await messaging.send(firebaseMessage);
-
-
-    console.log(
-      'Firebase notification sent:',
-      firebaseResponse
-    );
 
 
     // ========================================================
@@ -258,7 +253,7 @@ exports.createNotification = async (req, res) => {
       success: true,
 
       message:
-        'Notification saved and push notification sent successfully.',
+        'Notification saved successfully.',
 
       data:
         notification,

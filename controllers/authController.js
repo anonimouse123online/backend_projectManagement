@@ -102,19 +102,22 @@ exports.signup = async (req, res) => {
       `
       INSERT INTO users (
         full_name,
+        name,
         email,
         password_hash,
         role
       )
-      VALUES ($1, $2, $3, $4)
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING
         id,
         full_name,
+        name,
         email,
         role,
         created_at
       `,
       [
+        fullName,
         fullName,
         normalizedEmail,
         password_hash,
@@ -200,9 +203,9 @@ exports.login = async (req, res) => {
       }
     );
 
-    // Database stores lowercase roles
+    // Redirect according to role
     const redirectTo =
-      user.role === 'admin'
+      user.role?.toLowerCase() === 'admin'
         ? '/admin/dashboard'
         : '/engineer/dashboard';
 

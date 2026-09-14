@@ -38,8 +38,9 @@ exports.upload = multer({
 // ─── GET ALL TASKS ────────────────────────────────────────────────────────────
 // ─── GET ALL TASKS ────────────────────────────────────────────────────────────
 exports.getTasks = async function(req, res) {
+  const rawProjId = req.query.project_id !== undefined ? req.query.project_id : req.query.projectId;
+  const project_id = rawProjId !== undefined && rawProjId !== null ? String(rawProjId).trim() : '';
   const {
-    project_id,
     status,
     phase,
     priority,
@@ -47,18 +48,36 @@ exports.getTasks = async function(req, res) {
     search
   } = req.query;
 
+  const userId = req.user?.id || null;
+
   console.log('[ROUTE] GET /tasks filters:', {
     project_id,
     status,
     phase,
     priority,
     assignee_id,
-    search
+    search,
+    userId
   });
 
   try {
     const conditions = [];
     const params = [];
+
+    // ============================================================
+    // OWNER / MEMBER ISOLATION
+    // Only return tasks belonging to projects the user owns,
+    // is a member of, or is directly assigned to.
+    // ============================================================
+    if (userId) {
+      params.push(userId);
+      conditions.push(
+        `(p.owner_id = $${params.length}
+          OR p.code IN (SELECT pm.project_id FROM project_members pm WHERE pm.user_id = $${params.length})
+          OR p.id::text IN (SELECT pm.project_id FROM project_members pm WHERE pm.user_id = $${params.length})
+          OR t.assignee_id = $${params.length})`
+      );
+    }
 
     // PROJECT FILTER
     if (project_id) {
@@ -66,7 +85,9 @@ exports.getTasks = async function(req, res) {
 
       conditions.push(
         `(t.project_id::text = $${params.length}
-          OR p.code = $${params.length})`
+          OR p.code = $${params.length}
+          OR p.code ILIKE $${params.length}
+          OR p.name ILIKE $${params.length})`
       );
     }
 
@@ -146,10 +167,11 @@ exports.getTasks = async function(req, res) {
         u.full_name AS assignee,
         u.id AS assignee_id,
 
-        TO_CHAR(
-          t.due_date::date,
-          'Mon DD, YYYY'
-        ) AS due_date,
+        CASE
+          WHEN t.due_date ~ '^\\d{4}-\\d{2}-\\d{2}'
+            THEN TO_CHAR(t.due_date::date, 'Mon DD, YYYY')
+          ELSE COALESCE(t.due_date, '—')
+        END AS due_date,
 
         t.priority,
         t.status,
@@ -157,19 +179,20 @@ exports.getTasks = async function(req, res) {
         t.materials_required,
         t.site_instructions,
 
-        '[]'::jsonb AS subtasks,
+        COALESCE(t.subtasks, '[]'::jsonb) AS subtasks,
 
-        CASE
-          WHEN t.status ILIKE 'completed'
-            THEN 100
-
-          WHEN t.status ILIKE 'in progress'
-            OR t.status ILIKE 'in-progress'
-            OR t.status ILIKE 'ongoing'
-            THEN 50
-
-          ELSE 0
-        END AS progress_pct
+        COALESCE(
+          t.progress_pct,
+          CASE
+            WHEN t.status ILIKE 'completed'
+              THEN 100
+            WHEN t.status ILIKE 'in progress'
+              OR t.status ILIKE 'in-progress'
+              OR t.status ILIKE 'ongoing'
+              THEN 50
+            ELSE 0
+          END
+        ) AS progress_pct
 
       FROM tasks t
 
@@ -229,7 +252,7 @@ exports.getTaskById = async function(req, res) {
          COALESCE(t.task_name, t.title, 'Untitled Task') AS task_name,
          t.phase,
          u.full_name AS assignee,
-         TO_CHAR(t.due_date::date, 'Mon DD, YYYY') AS due_date,
+         CASE WHEN t.due_date ~ '^\d{4}-\d{2}-\d{2}' THEN TO_CHAR(t.due_date::date, 'Mon DD, YYYY') ELSE COALESCE(t.due_date, '—') END AS due_date,
          t.priority, t.status, t.manpower_needed,
          t.materials_required, t.site_instructions,
          p.name AS project_name, p.code AS project_code,
@@ -239,7 +262,7 @@ exports.getTaskById = async function(req, res) {
              SELECT pl.progress_pct
              FROM project_progress_logs pl
              WHERE pl.project_code = p.code
-               AND (pl.phase ILIKE '%' || SPLIT_PART(t.phase, ' - ', 2) || '%' OR pl.phase ILIKE t.phase)
+               AND (pl.phase ILIKE '%' || COALESCE(NULLIF(SPLIT_PART(t.phase, ' - ', 2), ''), t.phase) || '%' OR pl.phase ILIKE '%' || t.phase || '%')
              ORDER BY pl.created_at DESC
              LIMIT 1
            ),
@@ -248,12 +271,12 @@ exports.getTaskById = async function(req, res) {
                 ELSE 0 END,
            0
          ) AS progress_pct,
-       '[]'::jsonb AS subtasks,
+        COALESCE(t.subtasks, '[]'::jsonb) AS subtasks,
          (
            SELECT pl.progress_pct
            FROM project_progress_logs pl
            WHERE pl.project_code = p.code
-             AND (pl.phase ILIKE '%' || SPLIT_PART(t.phase, ' - ', 2) || '%' OR pl.phase ILIKE t.phase)
+             AND (pl.phase ILIKE '%' || COALESCE(NULLIF(SPLIT_PART(t.phase, ' - ', 2), ''), t.phase) || '%' OR pl.phase ILIKE '%' || t.phase || '%')
            ORDER BY pl.created_at DESC
            LIMIT 1
          ) AS phase_milestone_pct
@@ -290,7 +313,7 @@ exports.updateTaskStatus = async function(req, res) {
       } else if (st.includes('pending')) {
         progress_pct = 0;
       } else if (st.includes('in-progress') || st.includes('ongoing') || st.includes('in progress')) {
-        const cur = await pool.query('SELECT progress_pct FROM tasks WHERE id = $1::uuid', [id]);
+        const cur = await pool.query('SELECT progress_pct FROM tasks WHERE id::text = $1::text', [id]);
         const curVal = cur.rows[0]?.progress_pct || 0;
         progress_pct = curVal > 0 ? curVal : 50;
       }
@@ -301,7 +324,7 @@ exports.updateTaskStatus = async function(req, res) {
        SET status = COALESCE($1, status),
            progress_pct = COALESCE($2, progress_pct),
            updated_at = NOW()
-       WHERE id = $3::uuid
+       WHERE id::text = $3::text
        RETURNING *`,
       [status, progress_pct, id]
     );
@@ -365,7 +388,7 @@ exports.completeTask = async function(req, res) {
         LEFT JOIN projects p
           ON p.id = t.project_id
 
-        WHERE t.id = $1::uuid
+        WHERE t.id::text = $1::text
 
         LIMIT 1
         `,
@@ -410,7 +433,7 @@ exports.completeTask = async function(req, res) {
           status = 'Completed',
           updated_at = NOW()
 
-        WHERE id = $1::uuid
+        WHERE id::text = $1::text
 
         RETURNING
           id,
@@ -516,8 +539,10 @@ exports.updateTaskSubtasks = async function(req, res) {
       pct = Math.round((doneCount / subs.length) * 100);
     }
     let autoStatus = null;
-    if (pct === 100) autoStatus = 'Completed';
-    else if (pct > 0) autoStatus = 'In Progress';
+    if (subs.length > 0) {
+      if (pct === 100) autoStatus = 'Completed';
+      else autoStatus = 'In Progress';
+    }
 
     const result = await pool.query(
       `UPDATE tasks
@@ -525,7 +550,7 @@ exports.updateTaskSubtasks = async function(req, res) {
            progress_pct = $2,
            status = COALESCE($3, status),
            updated_at = NOW()
-       WHERE id = $4::uuid
+       WHERE id::text = $4::text
        RETURNING *`,
       [JSON.stringify(subs), pct, autoStatus, id]
     );
@@ -542,86 +567,212 @@ exports.updateTaskSubtasks = async function(req, res) {
   }
 };
 
+function parseMaterialItem(raw) {
+  let str = (raw || '').trim();
+  if (!str || str.toLowerCase() === 'standard site materials' || str.toLowerCase() === 'none specified') return null;
+  let category = 'Material';
+  if (str.toLowerCase().includes('(equipment)')) {
+    category = 'Equipment';
+    str = str.replace(/\(equipment\)/i, '').trim();
+  } else if (str.toLowerCase().includes('(material)')) {
+    category = 'Material';
+    str = str.replace(/\(material\)/i, '').trim();
+  }
+  const mMatch = str.match(/^([\d\.]+)\s*([a-zA-Z\.]+)?\s+(.+)$/);
+  if (mMatch) {
+    return {
+      quantity: Math.max(1, Math.round(parseFloat(mMatch[1]) || 1)),
+      unit: mMatch[2] || (category === 'Material' ? 'bags' : 'units'),
+      name: mMatch[3].trim(),
+      category
+    };
+  }
+  return {
+    quantity: 1,
+    unit: category === 'Material' ? 'units' : 'sets',
+    name: str,
+    category
+  };
+}
+
 // ─── CREATE TASK ──────────────────────────────────────────────────────────────
 exports.createTask = async function(req, res) {
   console.log('[ROUTE] POST /tasks → creating task:', req.body.taskName || req.body.task_name);
   try {
-    const taskName          = (req.body.taskName || req.body.task_name || '').trim();
-    const phase             = (req.body.phase || '').trim();
-    let assigneeId          = (req.body.assigneeId || req.body.assignee_id || '').trim();
-    const dueDate           = (req.body.dueDate || req.body.due_date || '').trim();
-    const priority          = (req.body.priority || '').trim();
-    const manpowerNeeded    = (req.body.manpowerNeeded || req.body.manpower_needed || '').trim();
-    const materialsRequired = (req.body.materialsRequired || req.body.materials_required || '').trim();
-    const siteInstructions  = (req.body.siteInstructions || req.body.site_instructions || '').trim();
-    let projectId           = (req.body.projectId || req.body.project_id || '').trim();
+    const taskName          = String(req.body.taskName || req.body.task_name || '').trim();
+    let phase               = String(req.body.phase || '').replace(/^Phase\s*\d+\s*[-–:]\s*/i, '').trim();
+    let assigneeId          = String(req.body.assigneeId || req.body.assignee_id || '').trim();
+    let dueDate             = String(req.body.dueDate || req.body.due_date || '').trim();
+    let priority            = String(req.body.priority || 'Medium').trim();
+    let manpowerNeeded      = String(req.body.manpowerNeeded !== undefined && req.body.manpowerNeeded !== null ? req.body.manpowerNeeded : (req.body.manpower_needed || '5 workers')).trim();
+    let materialsRequired   = String(req.body.materialsRequired !== undefined && req.body.materialsRequired !== null ? req.body.materialsRequired : (req.body.materials_required || '')).trim();
+    let siteInstructions    = String(req.body.siteInstructions !== undefined && req.body.siteInstructions !== null ? req.body.siteInstructions : (req.body.site_instructions || '')).trim();
+    
+    const rawProjectId      = req.body.projectId !== undefined && req.body.projectId !== null ? req.body.projectId : req.body.project_id;
+    const projectId         = rawProjectId !== undefined && rawProjectId !== null ? String(rawProjectId).trim() : '';
 
-    // Check all fields are provided
+    // Check minimum required fields
     if (!taskName) {
       return res.status(400).json({ error: 'Task name is required.' });
-    }
-    if (!phase) {
-      return res.status(400).json({ error: 'Phase is required.' });
     }
     if (!projectId) {
       return res.status(400).json({ error: 'Project is required.' });
     }
-    if (!assigneeId) {
-      return res.status(400).json({ error: 'Assignee engineer is required.' });
+
+    if (!phase) {
+      phase = 'Foundation';
     }
     if (!dueDate) {
-      return res.status(400).json({ error: 'Due date is required.' });
+      dueDate = new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0];
     }
     if (!priority) {
-      return res.status(400).json({ error: 'Priority is required.' });
+      priority = 'Medium';
     }
     if (!manpowerNeeded) {
-      return res.status(400).json({ error: 'Manpower needed is required.' });
+      manpowerNeeded = '5 workers';
     }
     if (!materialsRequired) {
-      return res.status(400).json({ error: 'Materials required is required.' });
+      materialsRequired = 'Standard site materials';
     }
     if (!siteInstructions) {
-      return res.status(400).json({ error: 'Site instructions are required.' });
+      siteInstructions = 'Standard engineering protocol';
     }
 
-    // Resolve projectId if passed as project code or UUID
+    // Resolve projectId if passed as project integer ID, code, or name
     let resolvedProjectId = null;
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId);
-    if (isUuid) {
-      resolvedProjectId = projectId;
-    } else {
-      const pRes = await pool.query('SELECT id FROM projects WHERE code = $1 OR name ILIKE $1 LIMIT 1', [projectId]);
+    const isNum = /^\d+$/.test(projectId);
+    if (isNum) {
+      const pRes = await pool.query('SELECT id FROM projects WHERE id = $1 LIMIT 1', [parseInt(projectId, 10)]);
+      if (pRes.rows.length > 0) resolvedProjectId = pRes.rows[0].id;
+    }
+    if (!resolvedProjectId) {
+      const pRes = await pool.query(
+        'SELECT id FROM projects WHERE code = $1 OR code ILIKE $1 OR name ILIKE $1 OR id::text = $1 LIMIT 1',
+        [projectId]
+      );
       if (pRes.rows.length > 0) resolvedProjectId = pRes.rows[0].id;
       else return res.status(400).json({ error: 'Selected project was not found.' });
     }
 
-    // Resolve assigneeId if passed as user name or email
+    // Resolve assigneeId if passed as user ID, full_name, or email
     let resolvedAssigneeId = null;
-    const isUserUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(assigneeId);
-    if (isUserUuid) {
-      resolvedAssigneeId = assigneeId;
-    } else {
-      const uRes = await pool.query('SELECT id FROM users WHERE full_name ILIKE $1 OR email ILIKE $1 LIMIT 1', [assigneeId]);
-      if (uRes.rows.length > 0) resolvedAssigneeId = uRes.rows[0].id;
-      else return res.status(400).json({ error: 'Selected assignee engineer was not found.' });
+    if (assigneeId) {
+      const uRes = await pool.query(
+        'SELECT id FROM users WHERE id::text = $1 OR full_name ILIKE $1 OR email ILIKE $1 LIMIT 1',
+        [assigneeId]
+      );
+      if (uRes.rows.length > 0) {
+        resolvedAssigneeId = uRes.rows[0].id;
+      }
+    }
+    // Fallback assignee if not resolved or empty
+    if (!resolvedAssigneeId) {
+      const fallback = await pool.query("SELECT id FROM users WHERE role ILIKE '%engineer%' OR role ILIKE '%admin%' LIMIT 1");
+      if (fallback.rows.length > 0) resolvedAssigneeId = fallback.rows[0].id;
     }
 
+    const subtasks = Array.isArray(req.body.subtasks) ? req.body.subtasks : [];
     const result = await pool.query(
       `INSERT INTO tasks
          (title, task_name, description, phase, assignee_id, due_date, priority,
           manpower_needed, materials_required, site_instructions,
-          project_id, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'Pending')
+          project_id, status, subtasks, progress_pct, progress)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'Pending', $12, 0, 0)
        RETURNING *`,
       [taskName, taskName, siteInstructions, phase, resolvedAssigneeId, dueDate, priority,
-       manpowerNeeded, materialsRequired, siteInstructions, resolvedProjectId]
+       manpowerNeeded, materialsRequired, siteInstructions, resolvedProjectId, JSON.stringify(subtasks)]
     );
     console.log('[ROUTE] POST /tasks → created task id:', result.rows[0].id);
+
+    // ─── Auto-sync allocated materials into project resources inventory ──────
+    try {
+      const matsToSync = [];
+      if (Array.isArray(req.body.allocatedMaterials) && req.body.allocatedMaterials.length > 0) {
+        for (const m of req.body.allocatedMaterials) {
+          const mName = String(m.name || '').trim();
+          if (!mName) continue;
+          matsToSync.push({
+            name: mName,
+            category: m.category === 'Equipment' ? 'Equipment' : 'Material',
+            supplier: m.supplier ? String(m.supplier).trim() : 'Task Allocation',
+            quantity: Math.max(1, Math.round(parseFloat(m.quantity) || 1)),
+            unit: String(m.unit || (m.category === 'Equipment' ? 'units' : 'bags')).trim(),
+            minThreshold: parseInt(m.minThreshold, 10) || 10,
+            unitPrice: parseFloat(m.unitPrice) || 0
+          });
+        }
+      } else if (materialsRequired && materialsRequired.toLowerCase() !== 'standard site materials') {
+        const parts = materialsRequired.split(',');
+        for (const part of parts) {
+          const parsed = parseMaterialItem(part);
+          if (parsed && parsed.name && parsed.name.toLowerCase() !== 'standard site materials') {
+            matsToSync.push(parsed);
+          }
+        }
+      }
+
+      if (matsToSync.length > 0 && resolvedProjectId) {
+        const pInfo = await pool.query('SELECT name, code FROM projects WHERE id = $1 LIMIT 1', [resolvedProjectId]);
+        if (pInfo.rows.length > 0) {
+          const projName = pInfo.rows[0].name;
+          const projCode = pInfo.rows[0].code;
+
+          for (const mat of matsToSync) {
+            const existRes = await pool.query(
+              `SELECT id, quantity FROM resources 
+               WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) 
+                 AND (project ILIKE $2 OR project ILIKE $3) 
+               LIMIT 1`,
+              [mat.name, projName, projCode]
+            );
+
+            const supplierVal = mat.supplier ? mat.supplier.trim() : 'Task Allocation';
+            const minThreshVal = parseInt(mat.minThreshold, 10) || 10;
+            const unitPriceVal = parseFloat(mat.unitPrice) || 0;
+
+            if (existRes.rows.length > 0) {
+              await pool.query(
+                `UPDATE resources 
+                 SET quantity = quantity + $1, 
+                     supplier = CASE WHEN (supplier = 'Task Allocation' OR supplier IS NULL OR supplier = '') AND $3 != '' THEN $3 ELSE supplier END,
+                     min_threshold = CASE WHEN (min_threshold = 0 OR min_threshold IS NULL) AND $4 > 0 THEN $4 ELSE min_threshold END,
+                     unit_price = CASE WHEN (unit_price = 0 OR unit_price IS NULL) AND $5 > 0 THEN $5 ELSE unit_price END,
+                     status = 'In stock', 
+                     updated_at = NOW() 
+                 WHERE id = $2`,
+                [mat.quantity, existRes.rows[0].id, supplierVal, minThreshVal, unitPriceVal]
+              );
+              console.log('[ROUTE] Updated existing resource quantity and details for:', mat.name);
+            } else {
+              await pool.query(
+                `INSERT INTO resources 
+                   (name, supplier, category, quantity, unit, min_threshold, unit_price, project, status)
+                 VALUES 
+                   ($1, $2, $3, $4, $5, $6, $7, $8, 'In stock')`,
+                [
+                  mat.name,
+                  supplierVal,
+                  mat.category,
+                  mat.quantity,
+                  mat.unit,
+                  minThreshVal,
+                  unitPriceVal,
+                  projName
+                ]
+              );
+              console.log('[ROUTE] Created new resource from task material:', mat.name, 'in project:', projName);
+            }
+          }
+        }
+      }
+    } catch (syncErr) {
+      console.error('[ROUTE] Auto-sync materials to resources error:', syncErr);
+    }
+
     res.status(201).json({ success: true, data: result.rows[0] });
   } catch (err) {
     console.error('[ROUTE] POST /tasks ERROR:', err);
-    res.status(500).json({ error: 'Failed to create task.' });
+    res.status(500).json({ error: 'Failed to create task: ' + (err.message || err) });
   }
 };
 
@@ -666,17 +817,56 @@ exports.assignTask = async function(req, res) {
 exports.getUsers = async function(req, res) {
   console.log('[ROUTE] GET /users');
   try {
-    const result = await pool.query(
-      `SELECT
-         u.id, u.full_name, u.email, u.role,
-         COUNT(t.id) FILTER (WHERE t.status != 'Completed') AS current_tasks
-       FROM users u
-       LEFT JOIN tasks t ON t.assignee_id = u.id
-       WHERE u.is_active = TRUE
-       GROUP BY u.id
-       ORDER BY u.full_name ASC`
-    );
-    console.log('[ROUTE] GET /users → returned', result.rows.length, 'user(s)');
+    const userId = req.user?.id || req.user?.user_id || null;
+    let query;
+    const params = [];
+
+    if (userId) {
+      params.push(userId);
+      query = `
+        SELECT
+          u.id, u.full_name, u.email, u.role,
+          COUNT(t.id) FILTER (WHERE t.status != 'Completed') AS current_tasks
+        FROM users u
+        LEFT JOIN tasks t ON t.assignee_id = u.id
+        WHERE u.is_active = TRUE
+          AND (
+            u.id = $1
+            OR u.id IN (
+              SELECT pm.user_id
+              FROM project_members pm
+              JOIN projects p ON (p.code = pm.project_id OR p.id::text = pm.project_id)
+              WHERE p.owner_id = $1
+                 OR p.code IN (SELECT pm2.project_id FROM project_members pm2 WHERE pm2.user_id = $1)
+                 OR p.id::text IN (SELECT pm2.project_id FROM project_members pm2 WHERE pm2.user_id = $1)
+            )
+            OR LOWER(TRIM(u.email)) IN (
+              SELECT LOWER(TRIM(pm.user_id))
+              FROM project_members pm
+              JOIN projects p ON (p.code = pm.project_id OR p.id::text = pm.project_id)
+              WHERE p.owner_id = $1
+                 OR p.code IN (SELECT pm2.project_id FROM project_members pm2 WHERE pm2.user_id = $1)
+                 OR p.id::text IN (SELECT pm2.project_id FROM project_members pm2 WHERE pm2.user_id = $1)
+            )
+          )
+        GROUP BY u.id
+        ORDER BY u.full_name ASC
+      `;
+    } else {
+      query = `
+        SELECT
+          u.id, u.full_name, u.email, u.role,
+          COUNT(t.id) FILTER (WHERE t.status != 'Completed') AS current_tasks
+        FROM users u
+        LEFT JOIN tasks t ON t.assignee_id = u.id
+        WHERE u.is_active = TRUE
+        GROUP BY u.id
+        ORDER BY u.full_name ASC
+      `;
+    }
+
+    const result = await pool.query(query, params);
+    console.log('[ROUTE] GET /users → returned', result.rows.length, 'user(s) for', userId);
     res.json({ success: true, data: result.rows });
   } catch (err) {
     console.error('[ROUTE] GET /users ERROR:', err);
@@ -1001,7 +1191,7 @@ exports.uploadTaskReport = async function(req, res) {
       LEFT JOIN users u
         ON u.id = t.assignee_id
 
-      WHERE t.id = $1::uuid
+      WHERE t.id::text = $1::text
 
       LIMIT 1
       `,
