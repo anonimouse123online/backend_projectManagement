@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -6,30 +8,62 @@ const http = require('http');
 const path = require('path');
 
 const routes = require('./routes/index');
+
+// ============================================================
+// PASSWORD RESET ROUTES
+// ============================================================
+
+const passwordResetRoutes =
+  require('./routes/passwordResetRoutes');
+
 const pool = require('./db');
 
-const { startScheduler } = require('./services/schedulerService');
-const { verifyToken } = require('./middlewares/authMiddleware');
-const initializeSocket = require('./services/socketService');
+const {
+  startScheduler
+} = require('./services/schedulerService');
+
+const {
+  verifyToken
+} = require('./middlewares/authMiddleware');
+
+const initializeSocket =
+  require('./services/socketService');
+
+
+// ============================================================
+// EXPRESS APP
+// ============================================================
 
 const app = express();
 
+
 // ============================================================
 // HTTP SERVER
+//
 // Required for Socket.IO
 // ============================================================
 
-const server = http.createServer(app);
+const server =
+  http.createServer(app);
+
 
 // ============================================================
 // SOCKET.IO
 // ============================================================
 
-const io = initializeSocket(server);
+const io =
+  initializeSocket(server);
+
 
 // Make io available inside controllers:
+//
 // const io = req.app.get('io');
-app.set('io', io);
+//
+app.set(
+  'io',
+  io
+);
+
 
 // ============================================================
 // SECURITY
@@ -41,6 +75,7 @@ app.use(
   })
 );
 
+
 // ============================================================
 // CORS
 // ============================================================
@@ -49,9 +84,13 @@ const corsOrigin =
   process.env.CORS_ORIGIN ||
   'http://localhost:5173';
 
+
 app.use(
   cors({
-    origin: corsOrigin,
+
+    origin:
+      corsOrigin,
+
     methods: [
       'GET',
       'POST',
@@ -59,12 +98,14 @@ app.use(
       'PATCH',
       'DELETE',
     ],
+
     allowedHeaders: [
       'Content-Type',
       'Authorization',
     ],
   })
 );
+
 
 // ============================================================
 // BODY PARSER
@@ -76,6 +117,7 @@ app.use(
   })
 );
 
+
 app.use(
   express.urlencoded({
     extended: true,
@@ -83,18 +125,32 @@ app.use(
   })
 );
 
+
 // ============================================================
 // RATE LIMIT
 // ============================================================
 
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100000,
-  standardHeaders: true,
-  legacyHeaders: false,
-});
+const limiter =
+  rateLimit({
 
-app.use(limiter);
+    windowMs:
+      15 * 60 * 1000,
+
+    max:
+      100000,
+
+    standardHeaders:
+      true,
+
+    legacyHeaders:
+      false,
+  });
+
+
+app.use(
+  limiter
+);
+
 
 // ============================================================
 // STATIC UPLOADS
@@ -106,6 +162,7 @@ app.use(limiter);
 
 app.use(
   '/uploads',
+
   express.static(
     path.join(
       __dirname,
@@ -114,18 +171,26 @@ app.use(
   )
 );
 
+
 // ============================================================
 // REQUEST LOGGER
 // ============================================================
 
-app.use((req, res, next) => {
+app.use(
+  (
+    req,
+    res,
+    next
+  ) => {
 
-  console.log(
-    `${req.method} ${req.url}`
-  );
+    console.log(
+      `${req.method} ${req.url}`
+    );
 
-  next();
-});
+    next();
+  }
+);
+
 
 // ============================================================
 // PUBLIC ROUTES
@@ -133,25 +198,38 @@ app.use((req, res, next) => {
 
 app.get(
   '/health',
-  (req, res) => {
+
+  (
+    req,
+    res
+  ) => {
 
     res.json({
-      status: 'ok',
-      socket: 'enabled',
+
+      status:
+        'ok',
+
+      socket:
+        'enabled',
     });
   }
 );
+
 
 // ============================================================
 // AUTHENTICATION MIDDLEWARE
 // ============================================================
 
 app.use(
-  (req, res, next) => {
+  (
+    req,
+    res,
+    next
+  ) => {
 
-    // --------------------------------------------
+    // ========================================================
     // PUBLIC ROUTES
-    // --------------------------------------------
+    // ========================================================
 
     if (
       req.path.startsWith('/auth/') ||
@@ -162,9 +240,10 @@ app.use(
       return next();
     }
 
-    // --------------------------------------------
+
+    // ========================================================
     // PROTECTED ROUTES
-    // --------------------------------------------
+    // ========================================================
 
     verifyToken(
       req,
@@ -174,8 +253,9 @@ app.use(
   }
 );
 
+
 // ============================================================
-// API ROUTES
+// EXISTING API ROUTES
 // ============================================================
 
 app.use(
@@ -183,60 +263,110 @@ app.use(
   routes
 );
 
+
+// ============================================================
+// PASSWORD RESET ROUTES
+//
+// Final endpoints:
+//
+// POST /auth/forgot-password
+// POST /auth/verify-reset-code
+// POST /auth/reset-password
+//
+// passwordResetRoutes.js only needs:
+//
+// /forgot-password
+// /verify-reset-code
+// /reset-password
+// ============================================================
+
+app.use(
+  '/auth',
+  passwordResetRoutes
+);
+
+
 // ============================================================
 // 404
 // ============================================================
 
 app.use(
-  (req, res) => {
+  (
+    req,
+    res
+  ) => {
 
     return res
       .status(404)
       .json({
-        success: false,
-        message: 'Route not found',
+
+        success:
+          false,
+
+        message:
+          'Route not found',
       });
   }
 );
+
 
 // ============================================================
 // GLOBAL ERROR HANDLER
 // ============================================================
 
 app.use(
-  (err, req, res, next) => {
+  (
+    err,
+    req,
+    res,
+    next
+  ) => {
 
     console.error(
       '❌ SERVER ERROR:',
       err
     );
 
-    // Multer file too large
+
+    // ========================================================
+    // MULTER FILE TOO LARGE
+    // ========================================================
+
     if (
-      err.code === 'LIMIT_FILE_SIZE'
+      err.code ===
+      'LIMIT_FILE_SIZE'
     ) {
 
       return res
         .status(413)
         .json({
-          success: false,
+
+          success:
+            false,
+
           message:
             'File is too large. Maximum size is 10 MB.',
         });
     }
 
+
     return res
       .status(
-        err.status || 500
+        err.status ||
+        500
       )
       .json({
-        success: false,
+
+        success:
+          false,
+
         message:
           err.message ||
           'Internal server error',
       });
   }
 );
+
 
 // ============================================================
 // PORT
@@ -246,6 +376,7 @@ const PORT =
   process.env.PORT ||
   5001;
 
+
 // ============================================================
 // DATABASE CONNECTION
 // ============================================================
@@ -254,13 +385,17 @@ pool
   .connect()
 
   .then(
-    (client) => {
+    (
+      client
+    ) => {
 
       console.log(
         '✅ Connected to PostgreSQL — updated_sitepulse'
       );
 
+
       client.release();
+
 
       // ======================================================
       // START SCHEDULED JOBS
@@ -268,39 +403,49 @@ pool
 
       startScheduler();
 
+
       // ======================================================
-      // IMPORTANT
+      // START HTTP + SOCKET.IO SERVER
       //
-      // Use server.listen instead of app.listen
-      // because Socket.IO is attached to server.
+      // 0.0.0.0 allows physical Android devices
+      // on the same network to access this backend.
       // ======================================================
 
       server.listen(
         PORT,
+        '0.0.0.0',
+
         () => {
 
           const BASE_URL =
             `http://localhost:${PORT}`;
 
+
           console.log('');
+
 
           console.log(
             '══════════════════════════════════════════════'
           );
+
 
           console.log(
             '🚀 SITEPULSE BACKEND RUNNING'
           );
 
+
           console.log(
             '══════════════════════════════════════════════'
           );
+
 
           console.log(
             `🌐 Base API: ${BASE_URL}`
           );
 
+
           console.log('');
+
 
           // ==================================================
           // PUBLIC
@@ -310,11 +455,14 @@ pool
             '📡 PUBLIC API'
           );
 
+
           console.log(
             `GET     ${BASE_URL}/health`
           );
 
+
           console.log('');
+
 
           // ==================================================
           // AUTH
@@ -324,15 +472,34 @@ pool
             '🔐 AUTH API'
           );
 
+
           console.log(
             `POST    ${BASE_URL}/auth/signup`
           );
+
 
           console.log(
             `POST    ${BASE_URL}/auth/login`
           );
 
+
+          console.log(
+            `POST    ${BASE_URL}/auth/forgot-password`
+          );
+
+
+          console.log(
+            `POST    ${BASE_URL}/auth/verify-reset-code`
+          );
+
+
+          console.log(
+            `POST    ${BASE_URL}/auth/reset-password`
+          );
+
+
           console.log('');
+
 
           // ==================================================
           // PROJECTS
@@ -342,27 +509,34 @@ pool
             '📁 PROJECT API'
           );
 
+
           console.log(
             `GET     ${BASE_URL}/projects`
           );
+
 
           console.log(
             `GET     ${BASE_URL}/projects/:id`
           );
 
+
           console.log(
             `POST    ${BASE_URL}/projects`
           );
+
 
           console.log(
             `PATCH   ${BASE_URL}/projects/:id`
           );
 
+
           console.log(
             `DELETE  ${BASE_URL}/projects/:id`
           );
 
+
           console.log('');
+
 
           // ==================================================
           // SOFTWARE
@@ -372,11 +546,14 @@ pool
             '💻 SOFTWARE API'
           );
 
+
           console.log(
             `GET     ${BASE_URL}/software`
           );
 
+
           console.log('');
+
 
           // ==================================================
           // MESSAGES
@@ -386,31 +563,39 @@ pool
             '💬 MESSAGE API'
           );
 
+
           console.log(
             `GET     ${BASE_URL}/messages/conversations`
           );
+
 
           console.log(
             `POST    ${BASE_URL}/messages/conversations`
           );
 
+
           console.log(
             `GET     ${BASE_URL}/messages/conversations/:conversationId`
           );
+
 
           console.log(
             `POST    ${BASE_URL}/messages`
           );
 
+
           console.log(
             `POST    ${BASE_URL}/messages/upload`
           );
+
 
           console.log(
             `PUT     ${BASE_URL}/messages/conversations/:conversationId/read`
           );
 
+
           console.log('');
+
 
           // ==================================================
           // SOCKET.IO
@@ -420,63 +605,84 @@ pool
             '⚡ REAL-TIME MESSAGING'
           );
 
+
           console.log(
             `Socket.IO: ${BASE_URL}`
           );
+
 
           console.log(
             'Events:'
           );
 
+
           console.log(
             '  join_user'
           );
+
 
           console.log(
             '  join_conversation'
           );
 
+
           console.log(
             '  leave_conversation'
           );
+
 
           console.log(
             '  new_message'
           );
 
+
           console.log(
             '  typing'
           );
+
 
           console.log(
             '  stop_typing'
           );
 
+
           console.log(
             '  messages_read'
           );
 
+
           console.log('');
+
 
           console.log(
             '══════════════════════════════════════════════'
           );
+
 
           console.log(
             `📱 Android Emulator Base URL: http://10.0.2.2:${PORT}/`
           );
 
+
+          console.log(
+            `📱 Physical Phone API:       http://10.119.145.52:${PORT}/`
+          );
+
+
           console.log(
             `🖥️  Web / Postman Base URL:   ${BASE_URL}/`
           );
+
 
           console.log(
             `📎 Upload URL:                ${BASE_URL}/uploads/`
           );
 
+
           console.log(
             '══════════════════════════════════════════════'
           );
+
 
           console.log('');
         }
@@ -485,12 +691,15 @@ pool
   )
 
   .catch(
-    (err) => {
+    (
+      err
+    ) => {
 
       console.error(
         '❌ PostgreSQL connection failed:',
         err.message
       );
+
 
       process.exit(1);
     }

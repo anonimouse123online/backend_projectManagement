@@ -2,42 +2,174 @@ const express = require('express');
 
 const router = express.Router();
 
-const authRoutes = require('./auth');
-const dashboardRoutes = require('./dashboard');
-const softwareRoutes = require('./software');
-const webRoutes = require('./web');
-const projectRoutes = require('./project');
-const resourceRoutes = require('./resource');
-const taskRoutes = require('./task');
-const userRoutes = require('./user');
-const reportRoutes = require('./routes_report');
-const timelogRoutes = require('./timelog');
-const issuesRoutes = require('./issuesRoutes');
-const messageRoutes = require('./messageRoutes');
 
+// ============================================================
+// ROUTES
+// ============================================================
+
+const authRoutes =
+  require('./auth');
+
+const dashboardRoutes =
+  require('./dashboard');
+
+const softwareRoutes =
+  require('./software');
+
+const webRoutes =
+  require('./web');
+
+const projectRoutes =
+  require('./project');
+
+const resourceRoutes =
+  require('./resource');
+
+const taskRoutes =
+  require('./task');
+
+const userRoutes =
+  require('./user');
+
+const reportRoutes =
+  require('./routes_report');
+
+const timelogRoutes =
+  require('./timelog');
+
+const issuesRoutes =
+  require('./issuesRoutes');
+
+const messageRoutes =
+  require('./messageRoutes');
+
+const notificationRoutes =
+  require('./notificationRoutes');
+
+
+// ============================================================
+// PASSWORD RESET
 // NEW
-const notificationRoutes = require('./notificationRoutes');
+// ============================================================
+
+const passwordResetRoutes =
+  require('./passwordResetRoutes');
 
 
-router.use('/auth', authRoutes);
+// ============================================================
+// AUTH
+// ============================================================
 
-router.use('/dashboard', dashboardRoutes);
+router.use(
+  '/auth',
+  authRoutes
+);
 
-router.use('/software', softwareRoutes);
 
-router.use('/web', webRoutes);
+// ============================================================
+// PASSWORD RESET
+//
+// Creates:
+//
+// POST /auth/forgot-password
+// POST /auth/verify-reset-code
+// POST /auth/reset-password
+// ============================================================
 
-router.use('/projects', projectRoutes);
+router.use(
+  '/auth',
+  passwordResetRoutes
+);
 
-router.use('/resources', resourceRoutes);
 
-router.use('/tasks', taskRoutes);
+// ============================================================
+// DASHBOARD
+// ============================================================
 
-router.use('/users', userRoutes);
+router.use(
+  '/dashboard',
+  dashboardRoutes
+);
 
-router.use('/reports', reportRoutes);
 
-router.use('/timelogs', timelogRoutes);
+// ============================================================
+// SOFTWARE
+// ============================================================
+
+router.use(
+  '/software',
+  softwareRoutes
+);
+
+
+// ============================================================
+// WEB
+// ============================================================
+
+router.use(
+  '/web',
+  webRoutes
+);
+
+
+// ============================================================
+// PROJECTS
+// ============================================================
+
+router.use(
+  '/projects',
+  projectRoutes
+);
+
+
+// ============================================================
+// RESOURCES
+// ============================================================
+
+router.use(
+  '/resources',
+  resourceRoutes
+);
+
+
+// ============================================================
+// TASKS
+// ============================================================
+
+router.use(
+  '/tasks',
+  taskRoutes
+);
+
+
+// ============================================================
+// USERS
+// ============================================================
+
+router.use(
+  '/users',
+  userRoutes
+);
+
+
+// ============================================================
+// REPORTS
+// ============================================================
+
+router.use(
+  '/reports',
+  reportRoutes
+);
+
+
+// ============================================================
+// TIMELOGS
+// ============================================================
+
+router.use(
+  '/timelogs',
+  timelogRoutes
+);
 
 
 // ============================================================
@@ -54,7 +186,10 @@ router.use(
 // ISSUES
 // ============================================================
 
-router.use('/', issuesRoutes);
+router.use(
+  '/',
+  issuesRoutes
+);
 
 
 // ============================================================
@@ -66,5 +201,9 @@ router.use(
   messageRoutes
 );
 
+
+// ============================================================
+// EXPORT ROUTER
+// ============================================================
 
 module.exports = router;
