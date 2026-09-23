@@ -18,7 +18,7 @@ exports.getTimelogs = async (req, res) => {
     // DISPLAY REQUEST INFORMATION
     // ========================================================
 
-    const fullUrl = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+    const fullUrl = `${req.protocol || 'http'}://${req.get ? req.get('host') : (req.headers?.host || 'localhost')}${req.originalUrl || ''}`;
 
     console.log('🌐 Method       :', req.method);
     console.log('🔗 API Endpoint :', req.originalUrl);
@@ -324,7 +324,7 @@ exports.createTimelog = async (req, res) => {
     // ========================================================
 
     const fullUrl =
-      `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+      `${req.protocol || 'http'}://${req.get ? req.get('host') : (req.headers?.host || 'localhost')}${req.originalUrl || ''}`;
 
     console.log('🌐 Method       :', req.method);
     console.log('🔗 API Endpoint :', req.originalUrl);

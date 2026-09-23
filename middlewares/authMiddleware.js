@@ -37,7 +37,7 @@ const verifyToken = (req, res, next) => {
  * Must be used AFTER verifyToken.
  */
 const requireAdmin = (req, res, next) => {
-  if (!req.user || req.user.role !== 'Admin') {
+  if (!req.user || req.user.role?.toLowerCase() !== 'admin') {
     return res.status(403).json({ error: 'Admin access required.' });
   }
   next();

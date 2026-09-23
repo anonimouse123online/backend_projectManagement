@@ -390,7 +390,7 @@ pool
     ) => {
 
       console.log(
-        '✅ Connected to PostgreSQL — updated_sitepulse'
+        `✅ Connected to PostgreSQL — ${process.env.DB_NAME || 'sitepulse_db'}`
       );
 
 

@@ -488,9 +488,63 @@ exports.getProjects = async (req, res) => {
           ) AS prog,
 
           COALESCE(
+            (
+              SELECT ROUND(AVG(
+                CASE
+                  WHEN jsonb_array_length(COALESCE(t.subtasks, '[]'::jsonb)) > 0 THEN
+                    (
+                      SELECT COUNT(*)
+                      FROM jsonb_array_elements(t.subtasks) elem
+                      WHERE (elem->>'completed')::boolean = true
+                    )::numeric / jsonb_array_length(t.subtasks)::numeric * 100
+                  WHEN LOWER(t.status) = 'completed' THEN 100
+                  WHEN LOWER(t.status) LIKE '%progress%' THEN COALESCE(t.progress_pct, 50)
+                  ELSE COALESCE(t.progress_pct, 0)
+                END
+              ))
+              FROM tasks t
+              WHERE t.project_id = p.id
+            ),
+            p.progress_pct,
             p.progress,
             0
-          ) AS progress,
+          )::int AS progress_pct,
+
+          COALESCE(
+            (
+              SELECT ROUND(AVG(
+                CASE
+                  WHEN jsonb_array_length(COALESCE(t.subtasks, '[]'::jsonb)) > 0 THEN
+                    (
+                      SELECT COUNT(*)
+                      FROM jsonb_array_elements(t.subtasks) elem
+                      WHERE (elem->>'completed')::boolean = true
+                    )::numeric / jsonb_array_length(t.subtasks)::numeric * 100
+                  WHEN LOWER(t.status) = 'completed' THEN 100
+                  WHEN LOWER(t.status) LIKE '%progress%' THEN COALESCE(t.progress_pct, 50)
+                  ELSE COALESCE(t.progress_pct, 0)
+                END
+              ))
+              FROM tasks t
+              WHERE t.project_id = p.id
+            ),
+            p.progress,
+            p.progress_pct,
+            0
+          )::int AS progress,
+
+          (
+            SELECT COUNT(*)
+            FROM tasks t
+            WHERE t.project_id = p.id
+          )::int AS total_tasks,
+
+          (
+            SELECT COUNT(*)
+            FROM tasks t
+            WHERE t.project_id = p.id
+              AND LOWER(t.status) = 'completed'
+          )::int AS completed_tasks,
 
           p.owner_id,
 
@@ -1149,6 +1203,24 @@ exports.getOverallProgress = async (req, res) => {
             ROUND(
               AVG(
                 COALESCE(
+                  (
+                    SELECT ROUND(AVG(
+                      CASE
+                        WHEN jsonb_array_length(COALESCE(t.subtasks, '[]'::jsonb)) > 0 THEN
+                          (
+                            SELECT COUNT(*)
+                            FROM jsonb_array_elements(t.subtasks) elem
+                            WHERE (elem->>'completed')::boolean = true
+                          )::numeric / jsonb_array_length(t.subtasks)::numeric * 100
+                        WHEN LOWER(t.status) = 'completed' THEN 100
+                        WHEN LOWER(t.status) LIKE '%progress%' THEN COALESCE(t.progress_pct, 50)
+                        ELSE COALESCE(t.progress_pct, 0)
+                      END
+                    ))
+                    FROM tasks t
+                    WHERE t.project_id = p.id
+                  ),
+                  p.progress_pct,
                   p.progress,
                   0
                 )
