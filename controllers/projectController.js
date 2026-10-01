@@ -1392,6 +1392,37 @@ const getProjectMembers = async (req, res) => {
     const result =
       await pool.query(
         `
+        -- First: the project owner (always appears first)
+        SELECT DISTINCT ON (u.id)
+          u.id,
+
+          COALESCE(
+            NULLIF(
+              TRIM(u.full_name),
+              ''
+            ),
+            u.email
+          ) AS name,
+
+          u.email,
+
+          'Owner' AS role,
+
+          p.created_at AS joined_at,
+
+          1 AS sort_priority
+
+        FROM projects p
+
+        INNER JOIN users u
+          ON u.id = p.owner_id
+
+        WHERE p.code = $1
+          AND p.owner_id IS NOT NULL
+
+        UNION ALL
+
+        -- Then: regular project members (excluding owner to avoid duplicate)
         SELECT
           u.id,
 
@@ -1414,7 +1445,9 @@ const getProjectMembers = async (req, res) => {
             'Member'
           ) AS role,
 
-          pm.joined_at
+          pm.joined_at,
+
+          2 AS sort_priority
 
         FROM project_members pm
 
@@ -1433,9 +1466,15 @@ const getProjectMembers = async (req, res) => {
           )
 
         WHERE pm.project_id = $1
+          -- Exclude the owner so they don't appear twice
+          AND u.id != COALESCE(
+            (SELECT owner_id FROM projects WHERE code = $1),
+            '00000000-0000-0000-0000-000000000000'::uuid
+          )
 
         ORDER BY
-          pm.joined_at ASC
+          sort_priority ASC,
+          joined_at ASC
         `,
         [
           code

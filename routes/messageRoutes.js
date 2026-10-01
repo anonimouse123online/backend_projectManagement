@@ -88,43 +88,42 @@ const fileFilter = (
 ) => {
 
   const allowedMimeTypes = [
-
     // Images
     'image/jpeg',
     'image/png',
     'image/webp',
+    'image/gif',
+    'image/svg+xml',
 
-    // PDFs
+    // Documents
     'application/pdf',
-
-    // Word
     'application/msword',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-
-    // Excel
     'application/vnd.ms-excel',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'text/csv',
+    'text/plain',
 
-    // Plain text
-    'text/plain'
+    // Archives
+    'application/zip',
+    'application/x-zip-compressed',
+    'application/x-rar-compressed',
+
+    // CAD / DWG / binary
+    'application/octet-stream',
+    'image/vnd.dwg',
+    'application/acad',
+    'application/x-acad',
+    'application/autocad_dwg'
   ];
 
   if (
-    allowedMimeTypes.includes(
-      file.mimetype
-    )
+    allowedMimeTypes.includes(file.mimetype) ||
+    file.originalname.match(/\.(jpg|jpeg|png|webp|gif|svg|pdf|doc|docx|xls|xlsx|csv|txt|zip|rar|dwg)$/i)
   ) {
-
     cb(null, true);
-
   } else {
-
-    cb(
-      new Error(
-        'Unsupported file type'
-      ),
-      false
-    );
+    cb(new Error('Unsupported file type. Please upload a standard image or document.'), false);
   }
 };
 
@@ -174,6 +173,14 @@ router.get(
 );
 
 
+// Get conversation members
+router.get(
+  '/conversations/:conversationId/members',
+  verifyToken,
+  messageController.getConversationMembers
+);
+
+
 // Mark read
 router.put(
   '/conversations/:conversationId/read',
@@ -190,13 +197,25 @@ router.post(
 );
 
 
+const handleUpload = (req, res, next) => {
+  upload.single('file')(req, res, (err) => {
+    if (err) {
+      console.error('MULTER ERROR:', err);
+      return res.status(400).json({
+        success: false,
+        message: err.message || 'File upload error'
+      });
+    }
+    next();
+  });
+};
+
 // Send image/file
 router.post(
   '/upload',
   verifyToken,
-  upload.single('file'),
+  handleUpload,
   messageController.sendAttachment
 );
-
 
 module.exports = router;

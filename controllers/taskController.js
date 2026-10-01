@@ -1958,18 +1958,99 @@ exports.assignTask = async function (
 };
 
 // ─── GET USERS ────────────────────────────────────────────────────────────────
+// Only returns users who share at least one project with the currently
+// logged-in user. Active Tasks count is scoped to shared projects only.
 exports.getUsers = async function(req, res) {
-  console.log('[ROUTE] GET /users');
+  const currentUserId = req.user?.id || req.user?.user_id || req.user?.userId;
+  console.log('[ROUTE] GET /users — currentUser:', currentUserId);
+
+  if (!currentUserId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
   try {
     const result = await pool.query(
-      `SELECT
+      `WITH my_projects AS (
+         -- All project UUIDs the current user has access to
+         SELECT p.id AS project_uuid
+         FROM projects p
+         WHERE p.owner_id = $1::uuid
+         UNION
+         SELECT p.id AS project_uuid
+         FROM projects p
+         JOIN project_members pm ON pm.project_id = p.code
+         WHERE pm.user_id = $1::uuid
+       )
+       SELECT
          u.id, u.full_name, u.email, u.role,
-         COUNT(t.id) FILTER (WHERE t.status != 'Completed') AS current_tasks
+         COUNT(t.id) FILTER (WHERE t.status != 'Completed') AS current_tasks,
+         CASE
+           WHEN u.id = $1::uuid THEN 'self'
+           WHEN EXISTS (
+             SELECT 1 FROM project_members pm 
+             JOIN projects p ON p.code = pm.project_id 
+             WHERE pm.user_id = u.id AND p.owner_id = $1::uuid
+           ) THEN 'my_member'
+           WHEN EXISTS (
+             SELECT 1 FROM projects p 
+             JOIN project_members pm ON pm.project_id = p.code 
+             WHERE p.owner_id = u.id AND pm.user_id = $1::uuid
+           ) THEN 'project_owner'
+           ELSE 'co_member'
+         END AS relationship,
+         (
+           u.id != $1::uuid AND EXISTS (
+             SELECT 1 FROM project_members pm 
+             JOIN projects p ON p.code = pm.project_id 
+             WHERE pm.user_id = u.id AND p.owner_id = $1::uuid
+           )
+         ) AS can_remove
        FROM users u
-       LEFT JOIN tasks t ON t.assignee_id = u.id
+       LEFT JOIN tasks t
+         ON t.assignee_id = u.id
+         AND t.project_id IN (SELECT project_uuid FROM my_projects)
        WHERE u.is_active = TRUE
+         AND (
+           -- Users who share a project with the current user via project_members
+           EXISTS (
+             SELECT 1 FROM project_members pm
+             WHERE pm.user_id = u.id
+               AND pm.project_id IN (
+                 SELECT pm2.project_id FROM project_members pm2
+                 WHERE pm2.user_id = $1::uuid
+               )
+           )
+           -- Or users who own a project that the current user is a member of
+           OR EXISTS (
+             SELECT 1 FROM projects p
+             WHERE p.owner_id = u.id
+               AND p.code IN (
+                 SELECT pm3.project_id FROM project_members pm3
+                 WHERE pm3.user_id = $1::uuid
+               )
+           )
+           -- Or the current user owns a project that this user is a member of
+           OR EXISTS (
+             SELECT 1 FROM project_members pm4
+             WHERE pm4.user_id = u.id
+               AND pm4.project_id IN (
+                 SELECT p2.code FROM projects p2
+                 WHERE p2.owner_id = $1::uuid
+               )
+           )
+           -- Include current user themselves if they have any project
+           OR (
+             u.id = $1::uuid
+             AND EXISTS (
+               SELECT 1 FROM project_members pm5 WHERE pm5.user_id = $1::uuid
+               UNION
+               SELECT 1 FROM projects p3 WHERE p3.owner_id = $1::uuid
+             )
+           )
+         )
        GROUP BY u.id
-       ORDER BY u.full_name ASC`
+       ORDER BY u.full_name ASC`,
+      [currentUserId]
     );
     console.log('[ROUTE] GET /users → returned', result.rows.length, 'user(s)');
     res.json({ success: true, data: result.rows });

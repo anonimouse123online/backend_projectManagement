@@ -113,6 +113,8 @@ CREATE TABLE IF NOT EXISTS resources (
   min_threshold   INTEGER DEFAULT 0,
   unit_price      NUMERIC(12,2) DEFAULT 0,
   project         VARCHAR(255),
+  task_id         UUID,
+  task_name       VARCHAR(255),
   status          VARCHAR(50) DEFAULT 'In stock',
   created_at      TIMESTAMP DEFAULT NOW(),
   updated_at      TIMESTAMP DEFAULT NOW()
@@ -272,6 +274,8 @@ CREATE TABLE IF NOT EXISTS time_logs (
 -- ─── MESSAGING: Conversations ────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS conversations (
   id          SERIAL PRIMARY KEY,
+  is_group    BOOLEAN DEFAULT FALSE,
+  group_name  VARCHAR(255),
   created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

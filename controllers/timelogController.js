@@ -14,6 +14,14 @@ exports.getTimelogs = async (req, res) => {
   try {
     const { search, date, engineer } = req.query;
 
+    // Get current user ID for project scoping
+    const currentUserId = req.user?.id || req.user?.user_id || req.user?.userId;
+    console.log('👤 Current User :', currentUserId);
+
+    if (!currentUserId) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
     // ========================================================
     // DISPLAY REQUEST INFORMATION
     // ========================================================
@@ -33,6 +41,9 @@ exports.getTimelogs = async (req, res) => {
 
     const conditions = [];
     const params = [];
+
+    // First param is always the current user ID for project scoping
+    params.push(currentUserId);
 
     // ========================================================
     // SEARCH FILTER
@@ -78,19 +89,33 @@ exports.getTimelogs = async (req, res) => {
     }
 
     // ========================================================
-    // WHERE CLAUSE
+    // WHERE CLAUSE (always includes project scope filter)
     // ========================================================
 
-    const whereClause =
-      conditions.length > 0
-        ? `WHERE ${conditions.join(' AND ')}`
-        : '';
+    // Always filter by accessible projects
+    let whereClause = `WHERE tl.project_name IN (SELECT project_name FROM my_projects)`;
+
+    if (conditions.length > 0) {
+      whereClause += ` AND ${conditions.join(' AND ')}`;
+    }
 
     // ========================================================
-    // POSTGRESQL QUERY
+    // POSTGRESQL QUERY (with project scoping CTE)
     // ========================================================
 
     const query = `
+      WITH my_projects AS (
+        -- Projects the current user owns
+        SELECT p.name AS project_name
+        FROM projects p
+        WHERE p.owner_id = $1::uuid
+        UNION
+        -- Projects the current user is a member of
+        SELECT p.name AS project_name
+        FROM projects p
+        JOIN project_members pm ON pm.project_id = p.code
+        WHERE pm.user_id = $1::uuid
+      )
       SELECT
         tl.id,
 
@@ -478,7 +503,9 @@ exports.createTimelog = async (req, res) => {
       weather?.trim() ||
         'Sunny',
 
-      temperature ?? null,
+      (temperature !== undefined && temperature !== null && String(temperature).trim() !== '')
+        ? (String(temperature).includes('°C') ? String(temperature).trim() : `${String(temperature).trim()}°C`)
+        : null,
 
       work_completed?.trim() ||
         '',

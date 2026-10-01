@@ -36,14 +36,23 @@ exports.getConversations = async (req, res) => {
       `
       SELECT
         c.id AS conversation_id,
+        COALESCE(c.is_group, FALSE) AS is_group,
+        c.group_name,
         c.created_at,
         c.updated_at,
 
-        other_user.id AS user_id,
-        other_user.full_name,
-        other_user.email,
+        CASE WHEN COALESCE(c.is_group, FALSE) = FALSE THEN other_user.id ELSE NULL END AS user_id,
+        CASE WHEN COALESCE(c.is_group, FALSE) = FALSE THEN other_user.full_name ELSE NULL END AS full_name,
+        CASE WHEN COALESCE(c.is_group, FALSE) = FALSE THEN other_user.email ELSE NULL END AS email,
 
-        latest.message_text AS last_message,
+        COALESCE(
+          latest.message_text,
+          CASE
+            WHEN latest.message_type = 'image' THEN 'Sent an image'
+            WHEN latest.message_type = 'file' THEN 'Sent an attachment'
+            ELSE NULL
+          END
+        ) AS last_message,
         latest.message_type,
         latest.created_at AS last_message_time,
 
@@ -53,7 +62,13 @@ exports.getConversations = async (req, res) => {
           WHERE unread.conversation_id = c.id
             AND unread.sender_id != $1
             AND unread.is_read = FALSE
-        )::INTEGER AS unread_count
+        )::INTEGER AS unread_count,
+
+        (
+          SELECT COUNT(*)
+          FROM conversation_members cm_count
+          WHERE cm_count.conversation_id = c.id
+        )::INTEGER AS member_count
 
       FROM conversations c
 
@@ -61,12 +76,14 @@ exports.getConversations = async (req, res) => {
         ON my_membership.conversation_id = c.id
        AND my_membership.user_id = $1
 
-      LEFT JOIN conversation_members other_membership
-        ON other_membership.conversation_id = c.id
-       AND other_membership.user_id != $1
-
-      LEFT JOIN users other_user
-        ON other_user.id = other_membership.user_id
+      LEFT JOIN LATERAL (
+        SELECT u.id, u.full_name, u.email
+        FROM conversation_members cm
+        JOIN users u ON u.id = cm.user_id
+        WHERE cm.conversation_id = c.id
+          AND cm.user_id != $1
+        LIMIT 1
+      ) other_user ON COALESCE(c.is_group, FALSE) = FALSE
 
       LEFT JOIN LATERAL (
         SELECT
@@ -88,9 +105,20 @@ exports.getConversations = async (req, res) => {
       [userId]
     );
 
+    const conversations = result.rows.map((row) => ({
+      ...row,
+      dm_user: (!row.is_group && row.user_id)
+        ? {
+            id: row.user_id,
+            full_name: row.full_name,
+            email: row.email
+          }
+        : null
+    }));
+
     return res.status(200).json({
       success: true,
-      conversations: result.rows
+      conversations
     });
 
   } catch (error) {
@@ -108,15 +136,47 @@ exports.getConversations = async (req, res) => {
 };
 
 
+// Helper: Verify if target users share at least one project with userId
+async function areUsersInSameProjects(clientOrPool, userId, targetUserIds) {
+  if (!targetUserIds || targetUserIds.length === 0) return true;
+  const res = await clientOrPool.query(
+    `
+    SELECT DISTINCT rel.user_id
+    FROM (
+      SELECT pm.user_id
+      FROM project_members pm
+      JOIN projects p ON (pm.project_id = p.code OR pm.project_id = p.id::text)
+      WHERE p.owner_id = $1::uuid
+      
+      UNION
+      
+      SELECT p.owner_id AS user_id
+      FROM projects p
+      JOIN project_members pm ON (pm.project_id = p.code OR pm.project_id = p.id::text)
+      WHERE pm.user_id = $1::uuid
+      
+      UNION
+      
+      SELECT pm1.user_id
+      FROM project_members pm1
+      JOIN projects p ON (pm1.project_id = p.code OR pm1.project_id = p.id::text)
+      WHERE pm1.project_id IN (
+        SELECT pm2.project_id
+        FROM project_members pm2
+        WHERE pm2.user_id = $1::uuid
+      )
+    ) rel
+    WHERE rel.user_id = ANY($2::uuid[])
+    `,
+    [userId, targetUserIds]
+  );
+  return res.rows.length === targetUserIds.length;
+}
+
 // ============================================================
-// CREATE / GET PRIVATE CONVERSATION
+// CREATE CONVERSATION (1-ON-1 OR GROUP)
 //
 // POST /api/messages/conversations
-//
-// BODY:
-// {
-//    "receiverId": 5
-// }
 // ============================================================
 
 exports.createConversation = async (req, res) => {
@@ -126,7 +186,7 @@ exports.createConversation = async (req, res) => {
   try {
 
     const senderId = getUserId(req);
-    const { receiverId } = req.body;
+    const { receiverId, isGroup, name, receiverIds } = req.body;
 
     if (!senderId) {
 
@@ -136,6 +196,76 @@ exports.createConversation = async (req, res) => {
       });
     }
 
+    // ========================================================
+    // CREATE GROUP CONVERSATION
+    // ========================================================
+    if (isGroup) {
+      const groupName = String(name || '').trim();
+      if (!groupName) {
+        return res.status(400).json({
+          success: false,
+          message: 'Group name is required'
+        });
+      }
+
+      const validReceiverIds = Array.isArray(receiverIds)
+        ? receiverIds.filter(id => id && String(id) !== String(senderId))
+        : [];
+
+      if (validReceiverIds.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Please select at least one member to add'
+        });
+      }
+
+      // Verify all added members share a project with the sender
+      const isAllowed = await areUsersInSameProjects(client, senderId, validReceiverIds);
+      if (!isAllowed) {
+        return res.status(403).json({
+          success: false,
+          message: 'You can only add members who share a project with you'
+        });
+      }
+
+      await client.query('BEGIN');
+
+      const conversation = await client.query(
+        `
+        INSERT INTO conversations (is_group, group_name)
+        VALUES (TRUE, $1)
+        RETURNING *
+        `,
+        [groupName]
+      );
+
+      const conversationId = conversation.rows[0].id;
+
+      // Add creator + all selected members
+      const allMembers = Array.from(new Set([senderId, ...validReceiverIds]));
+      for (const memberId of allMembers) {
+        await client.query(
+          `
+          INSERT INTO conversation_members (conversation_id, user_id)
+          VALUES ($1, $2::uuid)
+          ON CONFLICT DO NOTHING
+          `,
+          [conversationId, memberId]
+        );
+      }
+
+      await client.query('COMMIT');
+
+      return res.status(201).json({
+        success: true,
+        message: 'Group conversation created',
+        conversationId
+      });
+    }
+
+    // ========================================================
+    // CREATE / GET 1-ON-1 DIRECT MESSAGE
+    // ========================================================
     if (!receiverId) {
 
       return res.status(400).json({
@@ -144,7 +274,7 @@ exports.createConversation = async (req, res) => {
       });
     }
 
-    if (Number(senderId) === Number(receiverId)) {
+    if (String(senderId) === String(receiverId)) {
 
       return res.status(400).json({
         success: false,
@@ -152,10 +282,16 @@ exports.createConversation = async (req, res) => {
       });
     }
 
-    // ========================================================
-    // CHECK RECEIVER
-    // ========================================================
+    // Verify receiver shares a project with the sender
+    const isAllowed = await areUsersInSameProjects(client, senderId, [receiverId]);
+    if (!isAllowed) {
+      return res.status(403).json({
+        success: false,
+        message: 'You can only message users who belong to your projects'
+      });
+    }
 
+    // CHECK RECEIVER
     const receiver = await client.query(
       `
       SELECT id
@@ -173,10 +309,7 @@ exports.createConversation = async (req, res) => {
       });
     }
 
-    // ========================================================
-    // CHECK EXISTING PRIVATE CONVERSATION
-    // ========================================================
-
+    // CHECK EXISTING 1-ON-1 CONVERSATION
     const existing = await client.query(
       `
       SELECT c.id
@@ -190,11 +323,12 @@ exports.createConversation = async (req, res) => {
         ON cm2.conversation_id = c.id
        AND cm2.user_id = $2
 
-      WHERE (
-        SELECT COUNT(*)
-        FROM conversation_members total
-        WHERE total.conversation_id = c.id
-      ) = 2
+      WHERE COALESCE(c.is_group, FALSE) = FALSE
+        AND (
+          SELECT COUNT(*)
+          FROM conversation_members total
+          WHERE total.conversation_id = c.id
+        ) = 2
 
       LIMIT 1
       `,
@@ -215,24 +349,16 @@ exports.createConversation = async (req, res) => {
 
     await client.query('BEGIN');
 
-    // ========================================================
-    // CREATE CONVERSATION
-    // ========================================================
-
     const conversation = await client.query(
       `
-      INSERT INTO conversations
-      DEFAULT VALUES
+      INSERT INTO conversations (is_group)
+      VALUES (FALSE)
       RETURNING *
       `
     );
 
     const conversationId =
       conversation.rows[0].id;
-
-    // ========================================================
-    // ADD BOTH USERS
-    // ========================================================
 
     await client.query(
       `
@@ -242,8 +368,8 @@ exports.createConversation = async (req, res) => {
         user_id
       )
       VALUES
-        ($1, $2),
-        ($1, $3)
+        ($1, $2::uuid),
+        ($1, $3::uuid)
       `,
       [
         conversationId,
@@ -354,7 +480,25 @@ exports.getMessages = async (req, res) => {
           WHEN m.sender_id = $2::uuid
           THEN TRUE
           ELSE FALSE
-        END AS is_mine
+        END AS is_mine,
+
+        COALESCE(
+          (
+            SELECT json_agg(
+              json_build_object(
+                'id', a.id,
+                'originalName', a.original_name,
+                'fileName', a.file_name,
+                'filePath', a.file_path,
+                'mimeType', a.mime_type,
+                'fileSize', a.file_size
+              )
+            )
+            FROM message_attachments a
+            WHERE a.message_id = m.id
+          ),
+          '[]'::json
+        ) AS attachments
 
       FROM messages m
 
@@ -844,6 +988,89 @@ exports.markAsRead = async (req, res) => {
       success: false,
       message:
         'Failed to mark messages as read'
+    });
+  }
+};
+
+
+// ============================================================
+// GET CONVERSATION MEMBERS
+//
+// GET /api/messages/conversations/:conversationId/members
+// ============================================================
+
+exports.getConversationMembers = async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const { conversationId } = req.params;
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized'
+      });
+    }
+
+    // Verify requesting user is a member of this conversation
+    const memberCheck = await pool.query(
+      `
+      SELECT 1
+      FROM conversation_members
+      WHERE conversation_id = $1 AND user_id = $2
+      `,
+      [conversationId, userId]
+    );
+
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. You are not a member of this conversation.'
+      });
+    }
+
+    // Fetch conversation details + all members
+    const convInfo = await pool.query(
+      `
+      SELECT
+        c.id,
+        COALESCE(c.is_group, FALSE) AS is_group,
+        c.group_name,
+        c.created_at
+      FROM conversations c
+      WHERE c.id = $1
+      `,
+      [conversationId]
+    );
+
+    const membersResult = await pool.query(
+      `
+      SELECT
+        u.id,
+        u.full_name,
+        u.email,
+        u.role,
+        cm.joined_at
+      FROM conversation_members cm
+      JOIN users u ON u.id = cm.user_id
+      WHERE cm.conversation_id = $1
+      ORDER BY
+        CASE WHEN u.id = $2 THEN 0 ELSE 1 END,
+        u.full_name ASC
+      `,
+      [conversationId, userId]
+    );
+
+    return res.status(200).json({
+      success: true,
+      conversation: convInfo.rows[0] || null,
+      members: membersResult.rows
+    });
+
+  } catch (error) {
+    console.error('GET CONVERSATION MEMBERS ERROR:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch conversation members'
     });
   }
 };
