@@ -167,7 +167,11 @@ const getAll = async (
 
       p.status,
 
-      p.owner_id,
+      COALESCE(
+        p.progress,
+        p.progress_pct,
+        0
+      )::int AS progress,
 
 
       CASE
@@ -184,6 +188,12 @@ const getAll = async (
         p.start_date,
         'YYYY-MM-DD'
       ) AS start_date,
+
+
+      TO_CHAR(
+        p.end_date,
+        'YYYY-MM-DD'
+      ) AS due_date,
 
 
       TO_CHAR(
@@ -316,6 +326,13 @@ const getByCode = async (
           p.owner_id,
 
 
+          COALESCE(
+            p.progress,
+            p.progress_pct,
+            0
+          )::int AS progress,
+
+
           CASE
 
             WHEN p.owner_id = $2::uuid
@@ -330,6 +347,12 @@ const getByCode = async (
             p.start_date,
             'YYYY-MM-DD'
           ) AS start_date,
+
+
+          TO_CHAR(
+            p.end_date,
+            'YYYY-MM-DD'
+          ) AS due_date,
 
 
           TO_CHAR(

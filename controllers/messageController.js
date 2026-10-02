@@ -139,6 +139,20 @@ exports.getConversations = async (req, res) => {
 // Helper: Verify if target users share at least one project with userId
 async function areUsersInSameProjects(clientOrPool, userId, targetUserIds) {
   if (!targetUserIds || targetUserIds.length === 0) return true;
+
+  // Check if sender or any target user is admin
+  const adminCheck = await clientOrPool.query(
+    `SELECT id FROM users WHERE (id = $1::uuid OR id = ANY($2::uuid[])) AND LOWER(role) LIKE '%admin%'`,
+    [userId, targetUserIds]
+  );
+
+  const isSenderAdmin = adminCheck.rows.some(r => r.id === userId);
+  if (isSenderAdmin) return true;
+
+  const adminIds = new Set(adminCheck.rows.map(r => r.id));
+  const nonAdminTargets = targetUserIds.filter(id => !adminIds.has(id));
+  if (nonAdminTargets.length === 0) return true;
+
   const res = await clientOrPool.query(
     `
     SELECT DISTINCT rel.user_id
@@ -168,9 +182,9 @@ async function areUsersInSameProjects(clientOrPool, userId, targetUserIds) {
     ) rel
     WHERE rel.user_id = ANY($2::uuid[])
     `,
-    [userId, targetUserIds]
+    [userId, nonAdminTargets]
   );
-  return res.rows.length === targetUserIds.length;
+  return res.rows.length === nonAdminTargets.length;
 }
 
 // ============================================================
@@ -667,6 +681,55 @@ exports.sendMessage = async (req, res) => {
         );
     }
 
+    // ========================================================
+    // PUSH NOTIFICATION FOR OFFLINE / BACKGROUND USERS
+    // ========================================================
+    try {
+      const messaging = require('../configuration/firebaseAdmin');
+      if (messaging && messaging.send) {
+        const membersResult = await pool.query(
+          `SELECT user_id FROM conversation_members WHERE conversation_id = $1 AND user_id != $2`,
+          [conversationId, senderId]
+        );
+
+        const senderResult = await pool.query(
+          `SELECT full_name FROM users WHERE id = $1`,
+          [senderId]
+        );
+        const senderName = senderResult.rows[0]?.full_name || 'SitePulse User';
+
+        for (const row of membersResult.rows) {
+          messaging.send({
+            notification: {
+              title: senderName,
+              body: newMessage.message_text || 'New message'
+            },
+            data: {
+              title: senderName,
+              message: newMessage.message_text || 'New message',
+              conversationId: String(conversationId),
+              type: 'chat_message'
+            },
+            android: {
+              priority: 'high',
+              notification: {
+                channelId: 'sitepulse_notifications',
+                icon: 'ic_notification',
+                color: '#2563EB',
+                sound: 'default',
+                priority: 'high',
+                defaultSound: true,
+                defaultVibrateTimings: true
+              }
+            },
+            topic: `user_${row.user_id}`
+          }).catch(() => {});
+        }
+      }
+    } catch (pushErr) {
+      console.warn('Chat push notification warning:', pushErr.message);
+    }
+
     return res.status(201).json({
       success: true,
       message: newMessage
@@ -898,6 +961,55 @@ exports.sendAttachment = async (req, res) => {
           'new_message',
           responseMessage
         );
+    }
+
+    // ========================================================
+    // PUSH NOTIFICATION FOR OFFLINE / BACKGROUND USERS
+    // ========================================================
+    try {
+      const messaging = require('../configuration/firebaseAdmin');
+      if (messaging && messaging.send) {
+        const membersResult = await pool.query(
+          `SELECT user_id FROM conversation_members WHERE conversation_id = $1 AND user_id != $2`,
+          [conversationId, senderId]
+        );
+
+        const senderResult = await pool.query(
+          `SELECT full_name FROM users WHERE id = $1`,
+          [senderId]
+        );
+        const senderName = senderResult.rows[0]?.full_name || 'SitePulse User';
+
+        for (const row of membersResult.rows) {
+          messaging.send({
+            notification: {
+              title: senderName,
+              body: 'Sent an attachment'
+            },
+            data: {
+              title: senderName,
+              message: 'Sent an attachment',
+              conversationId: String(conversationId),
+              type: 'chat_message'
+            },
+            android: {
+              priority: 'high',
+              notification: {
+                channelId: 'sitepulse_notifications',
+                icon: 'ic_notification',
+                color: '#2563EB',
+                sound: 'default',
+                priority: 'high',
+                defaultSound: true,
+                defaultVibrateTimings: true
+              }
+            },
+            topic: `user_${row.user_id}`
+          }).catch(() => {});
+        }
+      }
+    } catch (pushErr) {
+      console.warn('Attachment push notification warning:', pushErr.message);
     }
 
     return res.status(201).json({

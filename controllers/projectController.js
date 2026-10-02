@@ -811,6 +811,8 @@ const joinProject = async (req, res) => {
     // This keeps compatibility with your old data.
     // ============================================================
 
+    const memberRole = req.user?.role || 'Member';
+
     await pool.query(
       `
       INSERT INTO project_members
@@ -825,13 +827,14 @@ const joinProject = async (req, res) => {
         $1,
         $2,
         $3,
-        'Member'
+        $4
       )
       `,
       [
         invite.project_id,
         userId,
-        userEmail
+        userEmail,
+        memberRole
       ]
     );
 
@@ -1307,6 +1310,8 @@ const addMember = async (req, res) => {
     }
 
 
+    const memberRole = req.body?.role || user.role || 'Member';
+
     await pool.query(
       `
       INSERT INTO project_members
@@ -1321,13 +1326,14 @@ const addMember = async (req, res) => {
         $1,
         $2,
         $3,
-        'Member'
+        $4
       )
       `,
       [
         code,
         userId,
-        user.email
+        user.email,
+        memberRole
       ]
     );
 
@@ -1408,6 +1414,8 @@ const getProjectMembers = async (req, res) => {
 
           'Owner' AS role,
 
+          u.role AS system_role,
+
           p.created_at AS joined_at,
 
           1 AS sort_priority
@@ -1438,12 +1446,17 @@ const getProjectMembers = async (req, res) => {
 
           COALESCE(
             NULLIF(
-              TRIM(pm.role),
+              CASE
+                WHEN LOWER(TRIM(pm.role)) = 'member' THEN NULLIF(TRIM(u.role), '')
+                ELSE NULLIF(TRIM(pm.role), '')
+              END,
               ''
             ),
             u.role,
             'Member'
           ) AS role,
+
+          u.role AS system_role,
 
           pm.joined_at,
 

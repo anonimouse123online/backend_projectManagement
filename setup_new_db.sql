@@ -246,6 +246,8 @@ CREATE TABLE IF NOT EXISTS notifications (
   title       VARCHAR(255) NOT NULL,
   message     TEXT NOT NULL,
   audience    VARCHAR(50) NOT NULL DEFAULT 'all',
+  project_id  VARCHAR(50),
+  target_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
   created_by  UUID REFERENCES users(id) ON DELETE SET NULL,
   created_at  TIMESTAMP DEFAULT NOW()
 );

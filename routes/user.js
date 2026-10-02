@@ -52,6 +52,9 @@ router.get(
         });
       }
 
+      const currentUserEmail =
+        req.user?.email || '';
+
       let result;
 
       if (!search) {
@@ -62,11 +65,14 @@ router.get(
             u.full_name,
             u.email,
             u.role,
-            ARRAY_AGG(DISTINCT rel.name) FILTER (WHERE rel.name IS NOT NULL) AS shared_projects
+            COALESCE(
+              ARRAY_AGG(DISTINCT rel.name) FILTER (WHERE rel.name IS NOT NULL),
+              '{}'
+            ) AS shared_projects
           FROM users u
           JOIN (
             -- 1. Members of projects owned by current user
-            SELECT pm.user_id, p.name
+            SELECT pm.user_id, pm.user_name, p.name
             FROM project_members pm
             JOIN projects p ON (pm.project_id = p.code OR pm.project_id = p.id::text)
             WHERE p.owner_id = $1::uuid
@@ -74,30 +80,33 @@ router.get(
             UNION
             
             -- 2. Owner of projects where current user is a member
-            SELECT p.owner_id AS user_id, p.name
+            SELECT p.owner_id AS user_id, NULL AS user_name, p.name
             FROM projects p
             JOIN project_members pm ON (pm.project_id = p.code OR pm.project_id = p.id::text)
-            WHERE pm.user_id = $1::uuid
+            WHERE pm.user_id = $1::uuid OR (LOWER(TRIM(pm.user_name)) = LOWER(TRIM($2)))
             
             UNION
             
             -- 3. Co-members in projects where current user is a member
-            SELECT pm1.user_id, p.name
+            SELECT pm1.user_id, pm1.user_name, p.name
             FROM project_members pm1
             JOIN projects p ON (pm1.project_id = p.code OR pm1.project_id = p.id::text)
             WHERE pm1.project_id IN (
               SELECT pm2.project_id
               FROM project_members pm2
-              WHERE pm2.user_id = $1::uuid
+              WHERE pm2.user_id = $1::uuid OR (LOWER(TRIM(pm2.user_name)) = LOWER(TRIM($2)))
             )
-          ) rel ON rel.user_id = u.id
+          ) rel ON (
+            rel.user_id = u.id
+            OR (u.email IS NOT NULL AND LOWER(TRIM(rel.user_name)) = LOWER(TRIM(u.email)))
+          )
           WHERE u.is_active = TRUE
             AND u.id != $1::uuid
           GROUP BY u.id, u.full_name, u.email, u.role
           ORDER BY u.full_name ASC
           LIMIT 50
           `,
-          [currentUserId]
+          [currentUserId, currentUserEmail]
         );
       } else {
         result = await pool.query(
@@ -107,11 +116,14 @@ router.get(
             u.full_name,
             u.email,
             u.role,
-            ARRAY_AGG(DISTINCT rel.name) FILTER (WHERE rel.name IS NOT NULL) AS shared_projects
+            COALESCE(
+              ARRAY_AGG(DISTINCT rel.name) FILTER (WHERE rel.name IS NOT NULL),
+              '{}'
+            ) AS shared_projects
           FROM users u
           JOIN (
             -- 1. Members of projects owned by current user
-            SELECT pm.user_id, p.name
+            SELECT pm.user_id, pm.user_name, p.name
             FROM project_members pm
             JOIN projects p ON (pm.project_id = p.code OR pm.project_id = p.id::text)
             WHERE p.owner_id = $1::uuid
@@ -119,38 +131,39 @@ router.get(
             UNION
             
             -- 2. Owner of projects where current user is a member
-            SELECT p.owner_id AS user_id, p.name
+            SELECT p.owner_id AS user_id, NULL AS user_name, p.name
             FROM projects p
             JOIN project_members pm ON (pm.project_id = p.code OR pm.project_id = p.id::text)
-            WHERE pm.user_id = $1::uuid
+            WHERE pm.user_id = $1::uuid OR (LOWER(TRIM(pm.user_name)) = LOWER(TRIM($2)))
             
             UNION
             
             -- 3. Co-members in projects where current user is a member
-            SELECT pm1.user_id, p.name
+            SELECT pm1.user_id, pm1.user_name, p.name
             FROM project_members pm1
             JOIN projects p ON (pm1.project_id = p.code OR pm1.project_id = p.id::text)
             WHERE pm1.project_id IN (
               SELECT pm2.project_id
               FROM project_members pm2
-              WHERE pm2.user_id = $1::uuid
+              WHERE pm2.user_id = $1::uuid OR (LOWER(TRIM(pm2.user_name)) = LOWER(TRIM($2)))
             )
-          ) rel ON rel.user_id = u.id
+          ) rel ON (
+            rel.user_id = u.id
+            OR (u.email IS NOT NULL AND LOWER(TRIM(rel.user_name)) = LOWER(TRIM(u.email)))
+          )
           WHERE u.is_active = TRUE
             AND u.id != $1::uuid
             AND (
-              u.full_name ILIKE $2
-              OR u.email ILIKE $2
-              OR rel.name ILIKE $2
+              u.full_name ILIKE $3
+              OR u.email ILIKE $3
+              OR u.role ILIKE $3
+              OR rel.name ILIKE $3
             )
           GROUP BY u.id, u.full_name, u.email, u.role
           ORDER BY u.full_name ASC
           LIMIT 50
           `,
-          [
-            currentUserId,
-            `%${search}%`
-          ]
+          [currentUserId, currentUserEmail, `%${search}%`]
         );
       }
 
