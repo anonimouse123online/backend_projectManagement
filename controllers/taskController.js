@@ -49,7 +49,9 @@ const getAccessibleProject = async (
       p.id,
       p.code,
       p.name,
-      p.owner_id
+      p.owner_id,
+      TO_CHAR(p.start_date, 'YYYY-MM-DD') AS start_date,
+      TO_CHAR(p.end_date, 'YYYY-MM-DD') AS end_date
 
     FROM projects p
 
@@ -1313,6 +1315,12 @@ exports.createTask = async function (req, res) {
     ).trim();
 
 
+    const startDate = (
+      req.body.startDate ||
+      req.body.start_date ||
+      ''
+    ).trim();
+
     const dueDate = (
       req.body.dueDate ||
       req.body.due_date ||
@@ -1450,6 +1458,52 @@ exports.createTask = async function (req, res) {
 
 
     const resolvedProjectId = project.id;
+
+    const todayStr = new Date().toISOString().split('T')[0];
+    if (startDate && startDate < todayStr) {
+      return res.status(400).json({
+        success: false,
+        error: 'Task start date cannot be a past date.'
+      });
+    }
+    if (dueDate && dueDate < todayStr) {
+      return res.status(400).json({
+        success: false,
+        error: 'Task due date cannot be a past date.'
+      });
+    }
+
+    if (project.start_date) {
+      const projStart = project.start_date;
+      if (startDate && startDate < projStart) {
+        return res.status(400).json({
+          success: false,
+          error: `Task start date cannot be earlier than project start date (${projStart}).`
+        });
+      }
+      if (dueDate && dueDate < projStart) {
+        return res.status(400).json({
+          success: false,
+          error: `Task due date cannot be earlier than project start date (${projStart}).`
+        });
+      }
+    }
+
+    if (project.end_date) {
+      const projEnd = project.end_date;
+      if (startDate && startDate > projEnd) {
+        return res.status(400).json({
+          success: false,
+          error: `Task start date cannot exceed project end date (${projEnd}).`
+        });
+      }
+      if (dueDate && dueDate > projEnd) {
+        return res.status(400).json({
+          success: false,
+          error: `Task due date cannot exceed project end date (${projEnd}).`
+        });
+      }
+    }
 
 
     // ============================================================

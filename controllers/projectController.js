@@ -489,7 +489,7 @@ const createProject = async (req, res) => {
     // Guarantee unique project code & default status to Planning
     const finalCode = await getUniqueProjectCode(code);
     const projectStatus = status || 'Planning';
-    const projectPhase = phase || null;
+    const projectPhase = (phase && String(phase).trim()) || 'Foundation';
 
 
     // ============================================================
