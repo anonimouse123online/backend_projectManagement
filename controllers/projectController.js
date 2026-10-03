@@ -551,19 +551,11 @@ const createProject = async (req, res) => {
         ) AS end_date
       `,
       [
-<<<<<<< HEAD
         finalCode,
         name.trim(),
         location.trim(),
         scope.trim(),
         client.trim(),
-=======
-        projectCode,
-        name,
-        location,
-        scope,
-        client,
->>>>>>> e1ef62db50f4cf7d8c6a5b613848b0760aef1588
         budget,
         start_date,
         end_date,
@@ -3039,13 +3031,13 @@ function getNextPhase(
     idx !== -1
     &&
     idx <
-      CONSTRUCTION_PHASES.length - 1
+    CONSTRUCTION_PHASES.length - 1
   ) {
 
     return {
       nextPhase:
         CONSTRUCTION_PHASES[
-          idx + 1
+        idx + 1
         ],
 
       isAllCompleted:
@@ -3708,17 +3700,17 @@ const createProjectIssue = async (req, res) => {
           category,
 
           priority ||
-            'Medium',
+          'Medium',
 
           location ||
-            null,
+          null,
 
           description.trim(),
 
           userId,
 
           assigned_to ||
-            null
+          null
         ]
       );
 
@@ -4290,30 +4282,30 @@ const createProjectReport = async (req, res) => {
           title.trim(),
 
           report_type ||
-            'Daily Site Log',
+          'Daily Site Log',
 
           report_date ||
-            null,
+          null,
 
           userId,
 
           summary.trim(),
 
           key_activities ||
-            null,
+          null,
 
           issues_highlighted ||
-            null,
+          null,
 
           parseInt(
             manpower_count
           ) || 0,
 
           equipment_on_site ||
-            null,
+          null,
 
           weather ||
-            'Clear'
+          'Clear'
 
         ]
       );
