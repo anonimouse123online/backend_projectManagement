@@ -467,7 +467,7 @@ exports.getTasks = async function (req, res) {
 
         t.status,
 
-        t.manpower_needed,
+        
 
         t.materials_required,
 
@@ -645,7 +645,7 @@ exports.getTaskById = async function (req, res) {
 
           t.status,
 
-          t.manpower_needed,
+          
 
           t.materials_required,
 
@@ -1319,10 +1319,7 @@ exports.createTask = async function (req, res) {
     ).trim();
 
 
-    const manpowerNeeded =
-      req.body.manpowerNeeded !== undefined && req.body.manpowerNeeded !== null
-        ? String(req.body.manpowerNeeded).trim()
-        : (req.body.manpower_needed ? String(req.body.manpower_needed).trim() : '');
+    // manpowerNeeded field removed as it is no longer used
 
 
     const materialsRequired =
@@ -1607,7 +1604,7 @@ exports.createTask = async function (req, res) {
           assignee_id,
           due_date,
           priority,
-          manpower_needed,
+
           materials_required,
           site_instructions,
           project_id,
@@ -1622,13 +1619,13 @@ exports.createTask = async function (req, res) {
           $3,
           $4,
           $5,
+
           $6,
           $7,
           $8,
           $9,
           $10,
-          $11,
-          $12
+          $11
         )
         RETURNING *
         `,
@@ -1638,7 +1635,7 @@ exports.createTask = async function (req, res) {
           assignee.id,
           dueDate,
           priority,
-          manpowerNeeded || null,
+
           materialsRequired,
           siteInstructions,
           resolvedProjectId,

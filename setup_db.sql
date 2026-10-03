@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   due_date            DATE,
   priority            VARCHAR(20) DEFAULT 'Medium',
   status              VARCHAR(50) DEFAULT 'Pending',
-  manpower_needed     TEXT,
+
   materials_required  TEXT,
   site_instructions   TEXT,
   project_id          UUID REFERENCES projects(id) ON DELETE SET NULL,
@@ -267,7 +267,7 @@ INSERT INTO project_members (project_id, user_id, role) VALUES
 ON CONFLICT (project_id, user_id) DO NOTHING;
 
 -- ─── TASKS ───────────────────────────────────────────────────────────────────
-INSERT INTO tasks (task_name, phase, assignee_id, due_date, priority, status, manpower_needed, materials_required, site_instructions, project_id) VALUES
+INSERT INTO tasks (task_name, phase, assignee_id, due_date, priority, status, materials_required, site_instructions, project_id) VALUES
   ('Foundation Pouring - Block A',   'Phase 1 - Foundation', (SELECT id FROM users WHERE email = 'mike.j@sitepulse.com'),   '2026-09-01', 'High',   'In Progress', '15 workers', '200 bags cement, 50 cu.m gravel',       'Ensure proper curing for 7 days', (SELECT id FROM projects WHERE code = 'PRJ-2026-001')),
   ('Steel Column Installation',      'Phase 2 - Structure',  (SELECT id FROM users WHERE email = 'sarah.c@sitepulse.com'),  '2026-09-15', 'High',   'Pending',     '12 workers', '80 steel columns, welding rods',         'Follow structural plan rev. 3',   (SELECT id FROM projects WHERE code = 'PRJ-2026-001')),
   ('Rebar Tying - Deck Slab',        'Phase 1 - Foundation', (SELECT id FROM users WHERE email = 'robert.m@sitepulse.com'), '2026-09-10', 'Medium', 'In Progress', '10 workers', '5 tons rebar, tie wire',                'Use #16mm for main bars',         (SELECT id FROM projects WHERE code = 'PRJ-2026-002')),

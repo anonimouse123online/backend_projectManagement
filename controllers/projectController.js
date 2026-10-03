@@ -377,6 +377,48 @@ const updateProjectStatus = async (req, res) => {
 // ============================================================
 // CREATE PROJECT
 //
+// ============================================================
+// PROJECT CODE GENERATOR & UNIQUENESS CHECK
+// ============================================================
+
+const getUniqueProjectCode = async (providedCode) => {
+  const currentYear = new Date().getFullYear();
+
+  // If code was provided, check if it's already in use
+  if (providedCode && typeof providedCode === 'string' && providedCode.trim().length > 0) {
+    const cleanCode = providedCode.trim();
+    const existing = await pool.query(
+      `SELECT id FROM projects WHERE UPPER(code) = UPPER($1)`,
+      [cleanCode]
+    );
+
+    if (existing.rows.length === 0) {
+      return cleanCode;
+    }
+  }
+
+  // Fallback or sequence auto-generation (PRJ-YYYY-XXX)
+  const countResult = await pool.query(`SELECT COUNT(*) FROM projects`);
+  let seq = parseInt(countResult.rows[0].count, 10) + 1;
+
+  while (true) {
+    const candidateCode = `PRJ-${currentYear}-${String(seq).padStart(3, '0')}`;
+    const check = await pool.query(
+      `SELECT id FROM projects WHERE UPPER(code) = UPPER($1)`,
+      [candidateCode]
+    );
+
+    if (check.rows.length === 0) {
+      return candidateCode;
+    }
+    seq++;
+  }
+};
+
+
+// ============================================================
+// CREATE PROJECT
+//
 // Logged-in user automatically becomes project owner.
 // ============================================================
 
@@ -397,38 +439,41 @@ const createProject = async (req, res) => {
       budget,
       start_date,
       end_date,
-      phase
+      phase,
+      status
     } = req.body;
 
 
     // ============================================================
     // VALIDATION
+    // Note: phase / initialPhase is no longer required.
     // ============================================================
 
     if (
-      !code ||
       !name ||
       !location ||
       !scope ||
       !client ||
       !budget ||
       !start_date ||
-      !end_date ||
-      !phase
+      !end_date
     ) {
 
       return res.status(400).json({
         success: false,
-        message: 'All fields are required.'
+        message: 'Name, location, scope, client, budget, start_date, and end_date are required.'
       });
     }
 
 
+    // Guarantee unique project code & default status to Planning
+    const finalCode = await getUniqueProjectCode(code);
+    const projectStatus = status || 'Planning';
+    const projectPhase = phase || null;
+
+
     // ============================================================
     // CREATE PROJECT
-    //
-    // projects does NOT have project_code.
-    // It uses "code".
     // ============================================================
 
     const { rows } = await pool.query(
@@ -459,8 +504,8 @@ const createProject = async (req, res) => {
         $7,
         $8,
         $9,
-        'Planning',
-        $10
+        $10,
+        $11
       )
 
       RETURNING
@@ -486,25 +531,23 @@ const createProject = async (req, res) => {
         ) AS end_date
       `,
       [
-        code,
-        name,
-        location,
-        scope,
-        client,
+        finalCode,
+        name.trim(),
+        location.trim(),
+        scope.trim(),
+        client.trim(),
         budget,
         start_date,
         end_date,
-        phase,
-
-        // Logged-in admin becomes owner
+        projectPhase,
+        projectStatus,
         req.user.id
       ]
     );
 
 
     return res.status(201).json({
-      success: true,
-      message: 'Project created successfully.',
+      message: 'Project created successfully',
       data: rows[0]
     });
 
@@ -1704,7 +1747,8 @@ const getProjectStats = async (req, res) => {
     const [
       taskStats,
       memberStats,
-      issueStats
+      issueStats,
+      budgetStats
     ] =
       await Promise.all([
 
@@ -1758,6 +1802,28 @@ const getProjectStats = async (req, res) => {
           [
             code
           ]
+        ),
+
+        pool.query(
+          `
+          SELECT
+            COALESCE(p.budget, 0)::numeric AS budget_allocated,
+
+            COALESCE(
+              (
+                SELECT SUM(COALESCE(r.quantity, 0) * COALESCE(r.unit_price, 0))
+                FROM resources r
+                WHERE LOWER(TRIM(r.project)) = LOWER(TRIM(p.code))
+                   OR LOWER(TRIM(r.project)) = LOWER(TRIM(p.name))
+                   OR r.task_id IN (SELECT id FROM tasks WHERE project_id = p.id)
+              ), 0
+            )::numeric AS total_resource_cost
+          FROM projects p
+          WHERE p.code = $1
+          `,
+          [
+            code
+          ]
         )
 
       ]);
@@ -1775,6 +1841,10 @@ const getProjectStats = async (req, res) => {
         taskStats.rows[0]
           ?.pending_task_issues
       ) || 0;
+
+    const budgetAllocated = parseFloat(budgetStats.rows[0]?.budget_allocated || 0);
+    const totalSpent = parseFloat(budgetStats.rows[0]?.total_resource_cost || 0);
+    const remainingBudget = budgetAllocated - totalSpent;
 
 
     return res.status(200).json({
@@ -1798,7 +1868,12 @@ const getProjectStats = async (req, res) => {
         pendingIssueCount:
           realIssues > 0
             ? realIssues
-            : taskPending
+            : taskPending,
+
+        budgetAllocated,
+        totalResourceCost: totalSpent,
+        totalSpent,
+        remainingBudget,
 
       }
     });

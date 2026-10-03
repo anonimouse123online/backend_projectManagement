@@ -160,6 +160,39 @@ const getAll = async (
       p.client,
 
       p.budget,
+      COALESCE(p.budget, 0)::numeric AS budget_allocated,
+
+      COALESCE(
+        (
+          SELECT SUM(COALESCE(r.quantity, 0) * COALESCE(r.unit_price, 0))
+          FROM resources r
+          WHERE LOWER(TRIM(r.project)) = LOWER(TRIM(p.code))
+             OR LOWER(TRIM(r.project)) = LOWER(TRIM(p.name))
+             OR r.task_id IN (SELECT id FROM tasks WHERE project_id = p.id)
+        ), 0
+      )::numeric AS total_resource_cost,
+
+      COALESCE(
+        (
+          SELECT SUM(COALESCE(r.quantity, 0) * COALESCE(r.unit_price, 0))
+          FROM resources r
+          WHERE LOWER(TRIM(r.project)) = LOWER(TRIM(p.code))
+             OR LOWER(TRIM(r.project)) = LOWER(TRIM(p.name))
+             OR r.task_id IN (SELECT id FROM tasks WHERE project_id = p.id)
+        ), 0
+      )::numeric AS total_spent,
+
+      (
+        COALESCE(p.budget, 0)::numeric - COALESCE(
+          (
+            SELECT SUM(COALESCE(r.quantity, 0) * COALESCE(r.unit_price, 0))
+            FROM resources r
+            WHERE LOWER(TRIM(r.project)) = LOWER(TRIM(p.code))
+               OR LOWER(TRIM(r.project)) = LOWER(TRIM(p.name))
+               OR r.task_id IN (SELECT id FROM tasks WHERE project_id = p.id)
+          ), 0
+        )::numeric
+      )::numeric AS remaining_budget,
 
       p.phase,
 
@@ -316,6 +349,39 @@ const getByCode = async (
           p.client,
 
           p.budget,
+          COALESCE(p.budget, 0)::numeric AS budget_allocated,
+
+          COALESCE(
+            (
+              SELECT SUM(COALESCE(r.quantity, 0) * COALESCE(r.unit_price, 0))
+              FROM resources r
+              WHERE LOWER(TRIM(r.project)) = LOWER(TRIM(p.code))
+                 OR LOWER(TRIM(r.project)) = LOWER(TRIM(p.name))
+                 OR r.task_id IN (SELECT id FROM tasks WHERE project_id = p.id)
+            ), 0
+          )::numeric AS total_resource_cost,
+
+          COALESCE(
+            (
+              SELECT SUM(COALESCE(r.quantity, 0) * COALESCE(r.unit_price, 0))
+              FROM resources r
+              WHERE LOWER(TRIM(r.project)) = LOWER(TRIM(p.code))
+                 OR LOWER(TRIM(r.project)) = LOWER(TRIM(p.name))
+                 OR r.task_id IN (SELECT id FROM tasks WHERE project_id = p.id)
+            ), 0
+          )::numeric AS total_spent,
+
+          (
+            COALESCE(p.budget, 0)::numeric - COALESCE(
+              (
+                SELECT SUM(COALESCE(r.quantity, 0) * COALESCE(r.unit_price, 0))
+                FROM resources r
+                WHERE LOWER(TRIM(r.project)) = LOWER(TRIM(p.code))
+                   OR LOWER(TRIM(r.project)) = LOWER(TRIM(p.name))
+                   OR r.task_id IN (SELECT id FROM tasks WHERE project_id = p.id)
+              ), 0
+            )::numeric
+          )::numeric AS remaining_budget,
 
           p.phase,
 
