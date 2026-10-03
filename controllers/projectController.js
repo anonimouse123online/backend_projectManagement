@@ -406,7 +406,6 @@ const createProject = async (req, res) => {
     // ============================================================
 
     if (
-      !code ||
       !name ||
       !location ||
       !scope ||
@@ -421,6 +420,26 @@ const createProject = async (req, res) => {
         success: false,
         message: 'All fields are required.'
       });
+    }
+
+    let projectCode = (code || '').trim();
+    if (!projectCode) {
+      const year = new Date().getFullYear();
+      let unique = false;
+      while (!unique) {
+        const rand = Math.floor(1000 + Math.random() * 9000);
+        projectCode = `PRJ-${year}-${rand}`;
+        const check = await pool.query('SELECT 1 FROM projects WHERE code = $1 LIMIT 1', [projectCode]);
+        if (check.rows.length === 0) unique = true;
+      }
+    } else {
+      const existing = await pool.query('SELECT 1 FROM projects WHERE code = $1 LIMIT 1', [projectCode]);
+      if (existing.rows.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Project code "${projectCode}" already exists. Please re-roll or try again.`
+        });
+      }
     }
 
 
@@ -486,7 +505,7 @@ const createProject = async (req, res) => {
         ) AS end_date
       `,
       [
-        code,
+        projectCode,
         name,
         location,
         scope,

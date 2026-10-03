@@ -2492,6 +2492,18 @@ exports.uploadTaskReport = async function(req, res) {
       finalReportText = finalReportText.replace(/Location:\s*(Foundation|Project Site|Phase\b[^\n]*)/i, `Location: ${task.project_location}`);
     }
 
+    // Strip any trailing prompt artifacts like "Generate the report now."
+    finalReportText = finalReportText.replace(/Generate the report now\.?/gi, '').trim();
+
+    // Extract manpower_count from report text (e.g., "Total: 5" or "Total: 1") or request body
+    let extractedManpower = Number(req.body.manpower_count || req.body.manpowerCount) || 0;
+    if (!extractedManpower && finalReportText) {
+      const match = finalReportText.match(/Total:\s*(\d+)/i);
+      if (match) {
+        extractedManpower = parseInt(match[1], 10);
+      }
+    }
+
     const result = await pool.query(
       `
       INSERT INTO project_reports (
@@ -2535,7 +2547,7 @@ exports.uploadTaskReport = async function(req, res) {
         NULL,
         NULL,
 
-        0,
+        $7,
         NULL,
         NULL,
 
@@ -2574,7 +2586,9 @@ exports.uploadTaskReport = async function(req, res) {
 
         finalReportText,
 
-        preparedBy
+        preparedBy,
+
+        extractedManpower
       ]
     );
 
