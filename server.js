@@ -217,6 +217,27 @@ app.get(
 
 
 // ============================================================
+// WEATHER PROXY ENDPOINT (Automatic GPS Weather for Mobile App & Web)
+// ============================================================
+app.get('/weather', async (req, res) => {
+  try {
+    const lat = req.query.lat || req.query.latitude || 9.88;
+    const lon = req.query.lon || req.query.longitude || 123.60;
+
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,is_day,weather_code,wind_speed_10m`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      return res.status(502).json({ success: false, error: 'Weather service unavailable' });
+    }
+    const data = await response.json();
+    return res.json({ success: true, ...data });
+  } catch (err) {
+    console.error('Weather proxy error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================
 // AUTHENTICATION MIDDLEWARE
 // ============================================================
 
@@ -234,6 +255,7 @@ app.use(
     if (
       req.path.startsWith('/auth/') ||
       req.path === '/health' ||
+      req.path === '/weather' ||
       req.path.startsWith('/uploads/')
     ) {
 
@@ -390,7 +412,7 @@ pool
     ) => {
 
       console.log(
-        '✅ Connected to PostgreSQL — updated_sitepulse'
+        `✅ Connected to PostgreSQL — ${process.env.DB_NAME || 'sitepulse_db'}`
       );
 
 

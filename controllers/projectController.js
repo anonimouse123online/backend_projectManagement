@@ -1,6 +1,7 @@
 const pool = require('../db');
 const projectService = require('../services/projectService');
 const crypto = require('crypto');
+const path = require('path');
 
 
 // ============================================================
@@ -810,6 +811,8 @@ const joinProject = async (req, res) => {
     // This keeps compatibility with your old data.
     // ============================================================
 
+    const memberRole = req.user?.role || 'Member';
+
     await pool.query(
       `
       INSERT INTO project_members
@@ -824,13 +827,14 @@ const joinProject = async (req, res) => {
         $1,
         $2,
         $3,
-        'Member'
+        $4
       )
       `,
       [
         invite.project_id,
         userId,
-        userEmail
+        userEmail,
+        memberRole
       ]
     );
 
@@ -1306,6 +1310,8 @@ const addMember = async (req, res) => {
     }
 
 
+    const memberRole = req.body?.role || user.role || 'Member';
+
     await pool.query(
       `
       INSERT INTO project_members
@@ -1320,13 +1326,14 @@ const addMember = async (req, res) => {
         $1,
         $2,
         $3,
-        'Member'
+        $4
       )
       `,
       [
         code,
         userId,
-        user.email
+        user.email,
+        memberRole
       ]
     );
 
@@ -1391,6 +1398,39 @@ const getProjectMembers = async (req, res) => {
     const result =
       await pool.query(
         `
+        -- First: the project owner (always appears first)
+        SELECT DISTINCT ON (u.id)
+          u.id,
+
+          COALESCE(
+            NULLIF(
+              TRIM(u.full_name),
+              ''
+            ),
+            u.email
+          ) AS name,
+
+          u.email,
+
+          'Owner' AS role,
+
+          u.role AS system_role,
+
+          p.created_at AS joined_at,
+
+          1 AS sort_priority
+
+        FROM projects p
+
+        INNER JOIN users u
+          ON u.id = p.owner_id
+
+        WHERE p.code = $1
+          AND p.owner_id IS NOT NULL
+
+        UNION ALL
+
+        -- Then: regular project members (excluding owner to avoid duplicate)
         SELECT
           u.id,
 
@@ -1406,14 +1446,21 @@ const getProjectMembers = async (req, res) => {
 
           COALESCE(
             NULLIF(
-              TRIM(pm.role),
+              CASE
+                WHEN LOWER(TRIM(pm.role)) = 'member' THEN NULLIF(TRIM(u.role), '')
+                ELSE NULLIF(TRIM(pm.role), '')
+              END,
               ''
             ),
             u.role,
             'Member'
           ) AS role,
 
-          pm.joined_at
+          u.role AS system_role,
+
+          pm.joined_at,
+
+          2 AS sort_priority
 
         FROM project_members pm
 
@@ -1432,9 +1479,15 @@ const getProjectMembers = async (req, res) => {
           )
 
         WHERE pm.project_id = $1
+          -- Exclude the owner so they don't appear twice
+          AND u.id != COALESCE(
+            (SELECT owner_id FROM projects WHERE code = $1),
+            '00000000-0000-0000-0000-000000000000'::uuid
+          )
 
         ORDER BY
-          pm.joined_at ASC
+          sort_priority ASC,
+          joined_at ASC
         `,
         [
           code
@@ -1937,7 +1990,8 @@ const getDocuments = async (req, res) => {
         name,
         type,
         category,
-        uploaded_at
+        uploaded_at,
+        file_path
 
       FROM documents
 
@@ -2038,6 +2092,35 @@ const uploadDocument = async (req, res) => {
       });
     }
 
+
+    if (req.files && req.files.length > 0) {
+      const inserted = [];
+      for (const file of req.files) {
+        let docName = (req.body.name || file.originalname.replace(/\.[^/.]+$/, '')).trim();
+        let ext = path.extname(file.originalname).replace('.', '').toUpperCase();
+        let docType = (req.body.type || ext || 'PDF').trim().toUpperCase();
+        if (docType === 'DOCX') docType = 'DOC';
+        if (docType === 'XLSX' || docType === 'CSV') docType = 'XLS';
+        let docCategory = (req.body.category || 'Design & Engineering').trim();
+        let filePath = `/uploads/documents/${file.filename}`;
+
+        const { rows } = await pool.query(
+          `
+          INSERT INTO documents (project_code, name, type, category, file_path)
+          VALUES ($1, $2, $3, $4, $5)
+          RETURNING id, name, type, category, uploaded_at, file_path
+          `,
+          [code, docName, docType, docCategory, filePath]
+        );
+        inserted.push(rows[0]);
+      }
+
+      return res.status(201).json({
+        success: true,
+        message: 'Documents uploaded successfully',
+        data: inserted
+      });
+    }
 
     let docs = [];
 
@@ -2493,9 +2576,50 @@ const getProjectProgress = async (req, res) => {
           status,
 
           COALESCE(
+            (
+              SELECT ROUND(AVG(
+                CASE
+                  WHEN jsonb_array_length(COALESCE(t.subtasks, '[]'::jsonb)) > 0 THEN
+                    (
+                      SELECT COUNT(*)
+                      FROM jsonb_array_elements(t.subtasks) elem
+                      WHERE (elem->>'completed')::boolean = true
+                    )::numeric / jsonb_array_length(t.subtasks)::numeric * 100
+                  WHEN LOWER(t.status) = 'completed' THEN 100
+                  WHEN LOWER(t.status) LIKE '%progress%' THEN COALESCE(t.progress_pct, 50)
+                  ELSE COALESCE(t.progress_pct, 0)
+                END
+              ))
+              FROM tasks t
+              WHERE t.project_id = projects.id
+            ),
+            progress_pct,
             progress,
             0
-          ) AS progress,
+          )::int AS progress,
+
+          COALESCE(
+            (
+              SELECT ROUND(AVG(
+                CASE
+                  WHEN jsonb_array_length(COALESCE(t.subtasks, '[]'::jsonb)) > 0 THEN
+                    (
+                      SELECT COUNT(*)
+                      FROM jsonb_array_elements(t.subtasks) elem
+                      WHERE (elem->>'completed')::boolean = true
+                    )::numeric / jsonb_array_length(t.subtasks)::numeric * 100
+                  WHEN LOWER(t.status) = 'completed' THEN 100
+                  WHEN LOWER(t.status) LIKE '%progress%' THEN COALESCE(t.progress_pct, 50)
+                  ELSE COALESCE(t.progress_pct, 0)
+                END
+              ))
+              FROM tasks t
+              WHERE t.project_id = projects.id
+            ),
+            progress_pct,
+            progress,
+            0
+          )::int AS progress_pct,
 
           start_date,
           end_date
@@ -2576,7 +2700,7 @@ const getProjectProgress = async (req, res) => {
 
     const progressPct =
       parseInt(
-        project.progress
+        project.progress_pct ?? project.progress
       ) || 0;
 
 
@@ -2610,6 +2734,28 @@ const getProjectProgress = async (req, res) => {
         ]
       );
 
+    const logsRes = await pool.query(
+      `
+      SELECT
+        l.id,
+        l.project_code,
+        l.phase,
+        l.progress_pct,
+        l.summary,
+        l.work_completed,
+        l.manpower,
+        l.weather,
+        l.logged_by,
+        l.created_at,
+        COALESCE(u.full_name, u.email) AS logged_by_name,
+        u.email AS logged_by_email
+      FROM project_progress_logs l
+      LEFT JOIN users u ON u.id = l.logged_by
+      WHERE l.project_code = $1
+      ORDER BY l.created_at DESC
+      `,
+      [code]
+    );
 
     return res.status(200).json({
 
@@ -2645,7 +2791,7 @@ const getProjectProgress = async (req, res) => {
           phaseRes.rows,
 
 
-        logs: []
+        logs: logsRes.rows
 
       }
     });
@@ -2867,9 +3013,10 @@ const logProjectProgress = async (req, res) => {
   try {
 
     const accessProject =
-      await getOwnedProject(
+      await getAccessibleProject(
         code,
-        req.user.id
+        req.user.id,
+        req.user.email
       );
 
 
@@ -2878,7 +3025,7 @@ const logProjectProgress = async (req, res) => {
       return res.status(403).json({
         success: false,
         message:
-          'Only the project owner can update project progress.'
+          'You do not have permission to update progress for this project.'
       });
     }
 
@@ -2894,6 +3041,7 @@ const logProjectProgress = async (req, res) => {
           status,
 
           COALESCE(
+            progress_pct,
             progress,
             0
           ) AS progress
@@ -2982,10 +3130,10 @@ const logProjectProgress = async (req, res) => {
           phase = $1,
           status = $2,
           progress = $3,
+          progress_pct = $3,
           updated_at = NOW()
 
         WHERE code = $4
-          AND owner_id = $5
 
         RETURNING
           id,
@@ -2994,14 +3142,14 @@ const logProjectProgress = async (req, res) => {
           phase,
           status,
           progress,
+          progress_pct,
           updated_at
         `,
         [
           targetPhase,
           targetStatus,
           pct,
-          code,
-          req.user.id
+          code
         ]
       );
 
@@ -3015,6 +3163,38 @@ const logProjectProgress = async (req, res) => {
         message:
           'Unable to update this project.'
       });
+    }
+
+    try {
+      await pool.query(
+        `
+        INSERT INTO project_progress_logs
+        (
+          project_code,
+          phase,
+          progress_pct,
+          summary,
+          work_completed,
+          manpower,
+          weather,
+          logged_by,
+          created_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+        `,
+        [
+          code,
+          targetPhase,
+          pct,
+          summary || null,
+          work_completed || null,
+          parseInt(manpower) || 0,
+          weather || null,
+          req.user.id
+        ]
+      );
+    } catch (logErr) {
+      console.error('Failed to insert project_progress_log:', logErr.message);
     }
 
 

@@ -794,6 +794,67 @@ exports.getTaskById = async function (req, res) {
   }
 };  
 
+// ============================================================
+// SYNC PROJECT PROGRESS FROM TASKS & SUBTASKS
+// ============================================================
+const syncProjectProgress = async (projectId) => {
+  if (!projectId) return 0;
+
+  try {
+    const tasksRes = await pool.query(
+      `SELECT id, status, progress_pct, subtasks
+       FROM tasks
+       WHERE project_id = $1::uuid`,
+      [projectId]
+    );
+
+    const tasks = tasksRes.rows;
+    if (tasks.length === 0) return 0;
+
+    let totalTaskScore = 0;
+    for (const t of tasks) {
+      const isCompleted = (t.status || '').toLowerCase().includes('completed');
+      const isOngoing = (t.status || '').toLowerCase().includes('progress') || (t.status || '').toLowerCase().includes('ongoing');
+      const subs = Array.isArray(t.subtasks) ? t.subtasks : [];
+
+      if (subs.length > 0) {
+        const done = subs.filter((s) => s && s.completed).length;
+        totalTaskScore += done / subs.length;
+      } else {
+        if (isCompleted) {
+          totalTaskScore += 1;
+        } else if (isOngoing) {
+          const pPct = Number(t.progress_pct);
+          totalTaskScore += !isNaN(pPct) && pPct > 0 ? pPct / 100 : 0.5;
+        } else {
+          totalTaskScore += 0;
+        }
+      }
+    }
+
+    const overallPct = Math.min(100, Math.max(0, Math.round((totalTaskScore / tasks.length) * 100)));
+
+    const targetStatus = overallPct === 100 ? 'Completed' : overallPct > 0 ? 'Ongoing' : 'Pending';
+
+    await pool.query(
+      `UPDATE projects
+       SET progress = $1,
+           progress_pct = $1,
+           status = COALESCE($2, status),
+           updated_at = NOW()
+       WHERE id = $3::uuid`,
+      [overallPct, targetStatus, projectId]
+    );
+
+    return overallPct;
+  } catch (err) {
+    console.error('syncProjectProgress error:', err.message);
+    return 0;
+  }
+};
+
+exports.syncProjectProgress = syncProjectProgress;
+
 // ─── UPDATE TASK STATUS ───────────────────────────────────────────────────────
 exports.updateTaskStatus = async function (
   req,
@@ -939,6 +1000,19 @@ exports.updateTaskStatus = async function (
         ]
       );
 
+    if (result.rows.length > 0) {
+      if (status && status.toLowerCase().includes('completed')) {
+        const cur = await pool.query(`SELECT subtasks FROM tasks WHERE id = $1::uuid`, [id]);
+        if (cur.rows.length && Array.isArray(cur.rows[0].subtasks)) {
+          const completedSubs = cur.rows[0].subtasks.map((s) => ({ ...s, completed: true }));
+          await pool.query(
+            `UPDATE tasks SET subtasks = $1 WHERE id = $2::uuid`,
+            [JSON.stringify(completedSubs), id]
+          );
+        }
+      }
+      await syncProjectProgress(result.rows[0].project_id);
+    }
 
     return res.status(200).json({
 
@@ -1012,6 +1086,18 @@ exports.completeTask = async function (
     }
 
 
+    const taskCurrent = await pool.query(
+      `SELECT id, project_id, subtasks FROM tasks WHERE id = $1::uuid`,
+      [taskId]
+    );
+    if (!taskCurrent.rows.length) {
+      return res.status(404).json({ success: false, error: 'Task not found or you do not have access.' });
+    }
+
+    const currentSubs = Array.isArray(taskCurrent.rows[0].subtasks)
+      ? taskCurrent.rows[0].subtasks.map((s) => ({ ...s, completed: true }))
+      : [];
+
     const result =
       await pool.query(
         `
@@ -1020,9 +1106,10 @@ exports.completeTask = async function (
         SET
           status = 'Completed',
           progress_pct = 100,
+          subtasks = $1,
           updated_at = NOW()
 
-        WHERE id = $1::uuid
+        WHERE id = $2::uuid
 
         RETURNING
           id,
@@ -1034,9 +1121,14 @@ exports.completeTask = async function (
           updated_at
         `,
         [
+          JSON.stringify(currentSubs),
           taskId
         ]
       );
+
+    if (result.rows.length > 0) {
+      await syncProjectProgress(result.rows[0].project_id);
+    }
 
 
     return res.status(200).json({
@@ -1085,7 +1177,7 @@ exports.updateTaskSubtasks = async function(req, res) {
       const doneCount = subs.filter(s => s.completed).length;
       pct = Math.round((doneCount / subs.length) * 100);
     }
-    let autoStatus = null;
+    let autoStatus = 'Pending';
     if (pct === 100) autoStatus = 'Completed';
     else if (pct > 0) autoStatus = 'In Progress';
 
@@ -1093,7 +1185,7 @@ exports.updateTaskSubtasks = async function(req, res) {
       `UPDATE tasks
        SET subtasks = $1,
            progress_pct = $2,
-           status = COALESCE($3, status),
+           status = $3,
            updated_at = NOW()
        WHERE id = $4::uuid
        RETURNING *`,
@@ -1103,6 +1195,8 @@ exports.updateTaskSubtasks = async function(req, res) {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Task not found.' });
     }
+
+    await syncProjectProgress(result.rows[0].project_id);
 
     console.log('[ROUTE] PATCH /tasks/' + id + '/subtasks → new progress:', pct + '%', 'status:', result.rows[0].status);
     res.json({ success: true, data: result.rows[0] });
@@ -1225,11 +1319,18 @@ exports.createTask = async function (req, res) {
     ).trim();
 
 
-    const materialsRequired = (
-      req.body.materialsRequired ||
-      req.body.materials_required ||
-      ''
-    ).trim();
+    const manpowerNeeded =
+      req.body.manpowerNeeded !== undefined && req.body.manpowerNeeded !== null
+        ? String(req.body.manpowerNeeded).trim()
+        : (req.body.manpower_needed ? String(req.body.manpower_needed).trim() : '');
+
+
+    const materialsRequired =
+      (
+        req.body.materialsRequired ||
+        req.body.materials_required ||
+        ''
+      ).trim();
 
 
     const siteInstructions = (
@@ -1302,7 +1403,8 @@ exports.createTask = async function (req, res) {
     if (!priority) {
       return res.status(400).json({
         success: false,
-        error: 'Priority is required.'
+        error:
+          'Priority is required.'
       });
     }
 
@@ -1441,6 +1543,48 @@ exports.createTask = async function (req, res) {
 
 
     // ============================================================
+    // ============================================================
+    // PARSE SUBTASKS
+    // ============================================================
+
+    const rawSubtasks = req.body.subtasks;
+    let initialSubtasks = [];
+    if (Array.isArray(rawSubtasks)) {
+      initialSubtasks = rawSubtasks
+        .map((st, idx) => {
+          if (typeof st === 'string') {
+            return {
+              id: `${Date.now()}_${idx}`,
+              title: st.trim(),
+              completed: false,
+            };
+          }
+          if (st && typeof st === 'object') {
+            return {
+              id: String(st.id || `${Date.now()}_${idx}`),
+              title: String(st.title || st.name || '').trim(),
+              completed: Boolean(st.completed),
+            };
+          }
+          return null;
+        })
+        .filter((st) => st && st.title.length > 0);
+    }
+
+    const doneCount = initialSubtasks.filter((s) => s.completed).length;
+    const initialProgressPct =
+      initialSubtasks.length > 0
+        ? Math.round((doneCount / initialSubtasks.length) * 100)
+        : 0;
+
+    let initialStatus = 'Pending';
+    if (initialProgressPct === 100) {
+      initialStatus = 'Completed';
+    } else if (initialProgressPct > 0) {
+      initialStatus = 'In Progress';
+    }
+
+    // ============================================================
     // CREATE TASK
     // ============================================================
 
@@ -1456,33 +1600,37 @@ exports.createTask = async function (req, res) {
     const result =
       await pool.query(
         `
-          INSERT INTO tasks
-          (
-            task_name,
-            phase,
-            assignee_id,
-            due_date,
-            priority,
-            materials_required,
-            site_instructions,
-            project_id,
-            status
-          )
-
-          VALUES
-          (
-            $1,
-            $2,
-            $3,
-            $4,
-            $5,
-            $6,
-            $7,
-            $8,
-            'Pending'
-          )
-
-          RETURNING *
+        INSERT INTO tasks
+        (
+          task_name,
+          phase,
+          assignee_id,
+          due_date,
+          priority,
+          manpower_needed,
+          materials_required,
+          site_instructions,
+          project_id,
+          status,
+          subtasks,
+          progress_pct
+        )
+        VALUES
+        (
+          $1,
+          $2,
+          $3,
+          $4,
+          $5,
+          $6,
+          $7,
+          $8,
+          $9,
+          $10,
+          $11,
+          $12
+        )
+        RETURNING *
         `,
         [
           taskName,
@@ -1490,20 +1638,122 @@ exports.createTask = async function (req, res) {
           assignee.id,
           dueDate,
           priority,
+          manpowerNeeded || null,
           materialsRequired,
           siteInstructions,
-          resolvedProjectId
+          resolvedProjectId,
+          initialStatus,
+          JSON.stringify(initialSubtasks),
+          initialProgressPct,
         ]
       );
 
 
-    console.log('======================================');
-    console.log('✅ TASK CREATED SUCCESSFULLY');
-    console.log('TASK ID:', result.rows[0].id);
-    console.log('TASK:', result.rows[0].task_name);
-    console.log('PHASE:', result.rows[0].phase);
-    console.log('======================================');
+    // ============================================================
+    // SYNC MATERIALS & RESOURCES TO INVENTORY (resources table)
+    // ============================================================
+    try {
+      const rawAllocated = req.body.allocatedMaterials || req.body.allocated_materials;
+      const projectName = project.name;
 
+      if (Array.isArray(rawAllocated) && rawAllocated.length > 0) {
+        for (const item of rawAllocated) {
+          if (!item || !item.name || !item.name.trim()) continue;
+
+          const itemName = item.name.trim();
+          const category = item.category === 'Equipment' ? 'Equipment' : 'Material';
+          const supplier = (item.supplier || 'General Supplier').trim();
+          const quantity = parseInt(item.quantity) || 0;
+          const unit = (item.unit || (category === 'Equipment' ? 'units' : 'bags')).trim();
+          const minThreshold = parseInt(item.minThreshold || item.min_threshold) || 10;
+          const unitPrice = parseFloat(item.unitPrice || item.unit_price) || 0;
+
+          // Check if resource already exists for this project
+          const existingRes = await pool.query(
+            `SELECT id, quantity, min_threshold FROM resources
+             WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
+               AND LOWER(TRIM(project)) = LOWER(TRIM($2))
+             LIMIT 1`,
+            [itemName, projectName]
+          );
+
+          if (existingRes.rows.length > 0) {
+            const current = existingRes.rows[0];
+            const newQty = (current.quantity || 0) + quantity;
+            const status = newQty <= (current.min_threshold || 10)
+              ? 'Low stock'
+              : (category === 'Equipment' ? 'Available' : 'In stock');
+
+            await pool.query(
+              `UPDATE resources
+               SET quantity = $1,
+                   status = $2,
+                   updated_at = NOW()
+               WHERE id = $3`,
+              [newQty, status, current.id]
+            );
+          } else {
+            const status = quantity <= minThreshold
+              ? (quantity === 0 ? 'Out of stock' : 'Low stock')
+              : (category === 'Equipment' ? 'Available' : 'In stock');
+
+            await pool.query(
+              `INSERT INTO resources
+               (name, supplier, category, quantity, unit, min_threshold, unit_price, project, status, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())`,
+              [itemName, supplier, category, quantity, unit, minThreshold, unitPrice, projectName, status]
+            );
+          }
+        }
+      } else if (materialsRequired) {
+        const parts = materialsRequired.split(',').map((p) => p.trim()).filter(Boolean);
+        for (const part of parts) {
+          const match = part.match(/^(\d+(?:\.\d+)?)\s*([a-zA-Z.]+)?\s+(.+)$/);
+          let qty = 1;
+          let unit = 'units';
+          let name = part;
+          if (match) {
+            qty = parseInt(match[1]) || 1;
+            unit = match[2] || 'units';
+            name = match[3].trim();
+          }
+
+          if (!name) continue;
+
+          const existingRes = await pool.query(
+            `SELECT id, quantity, min_threshold FROM resources
+             WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
+               AND LOWER(TRIM(project)) = LOWER(TRIM($2))
+             LIMIT 1`,
+            [name, projectName]
+          );
+
+          if (existingRes.rows.length > 0) {
+            const current = existingRes.rows[0];
+            const newQty = (current.quantity || 0) + qty;
+            const status = newQty <= (current.min_threshold || 10) ? 'Low stock' : 'In stock';
+            await pool.query(
+              `UPDATE resources
+               SET quantity = $1, status = $2, updated_at = NOW()
+               WHERE id = $3`,
+              [newQty, status, current.id]
+            );
+          } else {
+            const status = qty <= 10 ? 'Low stock' : 'In stock';
+            await pool.query(
+              `INSERT INTO resources
+               (name, supplier, category, quantity, unit, min_threshold, unit_price, project, status, created_at, updated_at)
+               VALUES ($1, 'General Supplier', 'Material', $2, $3, 10, 0, $4, $5, NOW(), NOW())`,
+              [name, qty, unit, projectName, status]
+            );
+          }
+        }
+      }
+    } catch (resourceErr) {
+      console.error('Failed to sync resources to inventory:', resourceErr.message);
+    }
+
+    await syncProjectProgress(resolvedProjectId);
 
     return res.status(201).json({
 
@@ -1732,18 +1982,99 @@ exports.assignTask = async function (
 };
 
 // ─── GET USERS ────────────────────────────────────────────────────────────────
+// Only returns users who share at least one project with the currently
+// logged-in user. Active Tasks count is scoped to shared projects only.
 exports.getUsers = async function(req, res) {
-  console.log('[ROUTE] GET /users');
+  const currentUserId = req.user?.id || req.user?.user_id || req.user?.userId;
+  console.log('[ROUTE] GET /users — currentUser:', currentUserId);
+
+  if (!currentUserId) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
   try {
     const result = await pool.query(
-      `SELECT
+      `WITH my_projects AS (
+         -- All project UUIDs the current user has access to
+         SELECT p.id AS project_uuid
+         FROM projects p
+         WHERE p.owner_id = $1::uuid
+         UNION
+         SELECT p.id AS project_uuid
+         FROM projects p
+         JOIN project_members pm ON pm.project_id = p.code
+         WHERE pm.user_id = $1::uuid
+       )
+       SELECT
          u.id, u.full_name, u.email, u.role,
-         COUNT(t.id) FILTER (WHERE t.status != 'Completed') AS current_tasks
+         COUNT(t.id) FILTER (WHERE t.status != 'Completed') AS current_tasks,
+         CASE
+           WHEN u.id = $1::uuid THEN 'self'
+           WHEN EXISTS (
+             SELECT 1 FROM project_members pm 
+             JOIN projects p ON p.code = pm.project_id 
+             WHERE pm.user_id = u.id AND p.owner_id = $1::uuid
+           ) THEN 'my_member'
+           WHEN EXISTS (
+             SELECT 1 FROM projects p 
+             JOIN project_members pm ON pm.project_id = p.code 
+             WHERE p.owner_id = u.id AND pm.user_id = $1::uuid
+           ) THEN 'project_owner'
+           ELSE 'co_member'
+         END AS relationship,
+         (
+           u.id != $1::uuid AND EXISTS (
+             SELECT 1 FROM project_members pm 
+             JOIN projects p ON p.code = pm.project_id 
+             WHERE pm.user_id = u.id AND p.owner_id = $1::uuid
+           )
+         ) AS can_remove
        FROM users u
-       LEFT JOIN tasks t ON t.assignee_id = u.id
+       LEFT JOIN tasks t
+         ON t.assignee_id = u.id
+         AND t.project_id IN (SELECT project_uuid FROM my_projects)
        WHERE u.is_active = TRUE
+         AND (
+           -- Users who share a project with the current user via project_members
+           EXISTS (
+             SELECT 1 FROM project_members pm
+             WHERE pm.user_id = u.id
+               AND pm.project_id IN (
+                 SELECT pm2.project_id FROM project_members pm2
+                 WHERE pm2.user_id = $1::uuid
+               )
+           )
+           -- Or users who own a project that the current user is a member of
+           OR EXISTS (
+             SELECT 1 FROM projects p
+             WHERE p.owner_id = u.id
+               AND p.code IN (
+                 SELECT pm3.project_id FROM project_members pm3
+                 WHERE pm3.user_id = $1::uuid
+               )
+           )
+           -- Or the current user owns a project that this user is a member of
+           OR EXISTS (
+             SELECT 1 FROM project_members pm4
+             WHERE pm4.user_id = u.id
+               AND pm4.project_id IN (
+                 SELECT p2.code FROM projects p2
+                 WHERE p2.owner_id = $1::uuid
+               )
+           )
+           -- Include current user themselves if they have any project
+           OR (
+             u.id = $1::uuid
+             AND EXISTS (
+               SELECT 1 FROM project_members pm5 WHERE pm5.user_id = $1::uuid
+               UNION
+               SELECT 1 FROM projects p3 WHERE p3.owner_id = $1::uuid
+             )
+           )
+         )
        GROUP BY u.id
-       ORDER BY u.full_name ASC`
+       ORDER BY u.full_name ASC`,
+      [currentUserId]
     );
     console.log('[ROUTE] GET /users → returned', result.rows.length, 'user(s)');
     res.json({ success: true, data: result.rows });

@@ -200,9 +200,9 @@ exports.login = async (req, res) => {
       }
     );
 
-    // Database stores lowercase roles
+    // Database stores roles (handle case-insensitive)
     const redirectTo =
-      user.role === 'admin'
+      user.role?.toLowerCase() === 'admin'
         ? '/admin/dashboard'
         : '/engineer/dashboard';
 
