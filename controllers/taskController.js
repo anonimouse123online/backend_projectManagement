@@ -113,6 +113,7 @@ const getAccessibleTask = async (
 
       p.code AS project_code,
       p.name AS project_name,
+      p.location AS project_location,
       p.owner_id
 
     FROM tasks t
@@ -434,6 +435,9 @@ exports.getTasks = async function (req, res) {
         p.code
           AS project_code,
 
+        p.location
+          AS project_location,
+
         p.owner_id,
 
         CASE
@@ -656,6 +660,9 @@ exports.getTaskById = async function (req, res) {
 
           p.code
             AS project_code,
+
+          p.location
+            AS project_location,
 
           COALESCE(
             t.progress_pct,
@@ -2239,6 +2246,7 @@ exports.generateReportNow = async function(req, res) {
     const taskResult = await pool.query(
       `SELECT t.id, t.task_name, t.site_instructions,
               p.name AS project_name,
+              p.location AS project_location,
               u.full_name AS assignee
        FROM tasks t
        LEFT JOIN projects p ON p.id = t.project_id
@@ -2303,7 +2311,7 @@ async function _processReportInBackground({ task, taskId, date, imagePaths }) {
     console.log('[AI] Background report generation started for task:', task.task_name);
 
     const { report, observations } = await generateAIReport({
-      task:       { task_name: task.task_name, project_name: task.project_name, assignee: task.assignee },
+      task:       { task_name: task.task_name, project_name: task.project_name, location: task.project_location, assignee: task.assignee },
       taskId,
       date,
       imagePaths,
@@ -2403,6 +2411,7 @@ exports.uploadTaskReport = async function(req, res) {
 
         p.code AS project_code,
         p.name AS project_name,
+        p.location AS project_location,
 
         u.full_name AS engineer_name,
         u.email AS engineer_email
@@ -2476,6 +2485,12 @@ exports.uploadTaskReport = async function(req, res) {
     // --------------------------------------------------------
     // INSERT INTO ADMIN PROJECT REPORTS
     // --------------------------------------------------------
+
+    // Normalize Location in reportText to actual project location if task.project_location is present
+    let finalReportText = report_text.trim();
+    if (task.project_location) {
+      finalReportText = finalReportText.replace(/Location:\s*(Foundation|Project Site|Phase\b[^\n]*)/i, `Location: ${task.project_location}`);
+    }
 
     const result = await pool.query(
       `
@@ -2557,7 +2572,7 @@ exports.uploadTaskReport = async function(req, res) {
         report_type ||
           'AI Field Report',
 
-        report_text.trim(),
+        finalReportText,
 
         preparedBy
       ]

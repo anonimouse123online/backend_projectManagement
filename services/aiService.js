@@ -48,7 +48,7 @@
     const requestPayload = {
         task_id:     taskId,
         task_name:   task.task_name,
-        location:    task.project_name || 'N/A',
+        location:    task.location || task.project_name || 'N/A',
         assigned_to: task.assignee     || 'N/A',
         date:        date,
         images:      base64Images,

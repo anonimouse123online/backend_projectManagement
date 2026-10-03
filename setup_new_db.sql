@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS project_issues (
 CREATE TABLE IF NOT EXISTS project_reports (
   id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   project_code        VARCHAR(50) REFERENCES projects(code) ON DELETE CASCADE,
+  task_id             UUID REFERENCES tasks(id) ON DELETE SET NULL,
   title               VARCHAR(255) NOT NULL,
   report_type         VARCHAR(100) NOT NULL DEFAULT 'Daily Site Log',
   report_date         DATE NOT NULL DEFAULT CURRENT_DATE,
@@ -167,6 +168,7 @@ CREATE TABLE IF NOT EXISTS project_reports (
   equipment_on_site   TEXT,
   weather             VARCHAR(50) DEFAULT 'Clear',
   status              VARCHAR(50) DEFAULT 'Final',
+  source              VARCHAR(50) DEFAULT 'Web Admin',
   created_at          TIMESTAMP DEFAULT NOW()
 );
 
