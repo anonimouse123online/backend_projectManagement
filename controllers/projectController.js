@@ -64,6 +64,7 @@ const getAccessibleProject = async (
       p.id,
       p.code,
       p.name,
+      p.status,
       p.owner_id
 
     FROM projects p
@@ -3650,6 +3651,14 @@ const createProjectIssue = async (req, res) => {
         success: false,
         message:
           'You do not have access to this project.'
+      });
+    }
+
+    if (accessProject.status && ['planning', 'draft', 'pending'].includes(accessProject.status.trim().toLowerCase())) {
+      return res.status(400).json({
+        success: false,
+        message:
+          'Cannot report issues because the project is in planning and not yet activated.'
       });
     }
 
