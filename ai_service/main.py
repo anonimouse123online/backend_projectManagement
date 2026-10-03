@@ -127,15 +127,23 @@ def generate_report(
     # OPTIMIZATION: Merged system + user into one leaner user message.
     # Duplicate instructions (role described twice) removed — saves input tokens.
     prompt = (
-        f"Write a concise daily construction site report.\n\n"
-        f"Task: {task_name}\n"
-        f"Location: {location}\n"
-        f"Assigned To: {assigned_to}\n"
+        f"You are a professional construction site report writer.\n"
+        f"Generate an official Daily Site Report in exactly this format (do NOT use markdown bolding ** or #):\n\n"
+        f"Daily Site Report\n\n"
         f"Date: {report_date}\n\n"
-        f"Site observations from {len(all_observations)} photo(s):\n{obs_text}\n"
-        f"Sections: 1. Work Done  2. Workers  3. Materials & Equipment  "
-        f"4. Safety  5. Recommendations\n"
-        f"Be factual and concise."
+        f"Project Name: {location}\n"
+        f"Location: {location}\n\n"
+        f"Manpower\n\n"
+        f"Total: 5\n"
+        f"- PIC: 1\n"
+        f"- Head Technician: 1\n"
+        f"- Technicians: 3\n\n"
+        f"Work Progress\n\n"
+        f"{task_name}: 100% Completed\n\n"
+        f"Ongoing Scope of works\n\n"
+        f"General Site Finishing & Testing\n\n"
+        f"Based on visual observations from {len(all_observations)} photo(s):\n{obs_text}\n"
+        f"Keep the output clean and strictly match the sections above."
     )
 
     messages = [
