@@ -1128,12 +1128,21 @@ exports.updateTaskSubtasks = async function(req, res) {
 // POST /tasks
 // ============================================================
 
+// ============================================================
+// CREATE TASK
+// POST /tasks
+// ============================================================
+
+// ============================================================
+// CREATE TASK
+// POST /tasks
+// ============================================================
+
 exports.createTask = async function (req, res) {
 
   if (!requireAuth(req, res)) {
     return;
   }
-
 
   console.log(
     '[POST /tasks]',
@@ -1141,6 +1150,9 @@ exports.createTask = async function (req, res) {
     req.body.task_name
   );
 
+  // Keep these outside try{} so catch{} can access them
+  let receivedPhase = '';
+  let phase = '';
 
   try {
 
@@ -1148,74 +1160,90 @@ exports.createTask = async function (req, res) {
     // REQUEST DATA
     // ============================================================
 
-    const taskName =
-      (
-        req.body.taskName ||
-        req.body.task_name ||
-        ''
-      ).trim();
+    const taskName = (
+      req.body.taskName ||
+      req.body.task_name ||
+      ''
+    ).trim();
 
 
-    const phase =
-      (
-        req.body.phase ||
-        ''
-      ).trim();
+    // ============================================================
+    // PHASE
+    // ============================================================
+
+    receivedPhase = (
+      req.body.phase ||
+      ''
+    ).trim();
 
 
-    let assigneeId =
-      (
-        req.body.assigneeId ||
-        req.body.assignee_id ||
-        ''
-      ).trim();
+    // Convert frontend short names to the EXACT values
+    // required by tasks_phase_check in PostgreSQL
+    const phaseMap = {
+      'Foundation': 'Phase 1 - Foundation',
+      'Structural': 'Phase 2 - Structural',
+      'Electrical & Utilities': 'Phase 3 - Electrical & Utilities',
+      'Plumbing & MEP': 'Phase 4 - Plumbing & MEP',
+      'Finishing': 'Phase 5 - Finishing',
+
+      // Also allow frontend to already send DB values
+      'Phase 1 - Foundation': 'Phase 1 - Foundation',
+      'Phase 2 - Structural': 'Phase 2 - Structural',
+      'Phase 3 - Electrical & Utilities': 'Phase 3 - Electrical & Utilities',
+      'Phase 4 - Plumbing & MEP': 'Phase 4 - Plumbing & MEP',
+      'Phase 5 - Finishing': 'Phase 5 - Finishing'
+    };
 
 
-    const dueDate =
-      (
-        req.body.dueDate ||
-        req.body.due_date ||
-        ''
-      ).trim();
+    phase = phaseMap[receivedPhase] || '';
 
 
-    const priority =
-      (
-        req.body.priority ||
-        ''
-      ).trim();
+    console.log('======================================');
+    console.log('CREATE TASK PHASE');
+    console.log('FRONTEND PHASE:', receivedPhase);
+    console.log('DATABASE PHASE:', phase);
+    console.log('======================================');
 
 
-    const manpowerNeeded =
-      (
-        req.body.manpowerNeeded ||
-        req.body.manpower_needed ||
-        ''
-      ).trim();
+    let assigneeId = (
+      req.body.assigneeId ||
+      req.body.assignee_id ||
+      ''
+    ).trim();
 
 
-    const materialsRequired =
-      (
-        req.body.materialsRequired ||
-        req.body.materials_required ||
-        ''
-      ).trim();
+    const dueDate = (
+      req.body.dueDate ||
+      req.body.due_date ||
+      ''
+    ).trim();
 
 
-    const siteInstructions =
-      (
-        req.body.siteInstructions ||
-        req.body.site_instructions ||
-        ''
-      ).trim();
+    const priority = (
+      req.body.priority ||
+      ''
+    ).trim();
 
 
-    const projectIdentifier =
-      (
-        req.body.projectId ||
-        req.body.project_id ||
-        ''
-      ).trim();
+    const materialsRequired = (
+      req.body.materialsRequired ||
+      req.body.materials_required ||
+      ''
+    ).trim();
+
+
+    const siteInstructions = (
+      req.body.siteInstructions ||
+      req.body.site_instructions ||
+      ''
+    ).trim();
+
+
+    const projectIdentifier = (
+      req.body.projectId ||
+      req.body.project_id ||
+      ''
+    ).trim();
 
 
     // ============================================================
@@ -1223,91 +1251,74 @@ exports.createTask = async function (req, res) {
     // ============================================================
 
     if (!taskName) {
-
       return res.status(400).json({
         success: false,
-        error:
-          'Task name is required.'
+        error: 'Task name is required.'
       });
     }
 
 
-    if (!phase) {
-
+    if (!receivedPhase) {
       return res.status(400).json({
         success: false,
-        error:
-          'Phase is required.'
+        error: 'Phase is required.'
+      });
+    }
+
+
+    // Reject phases that are not part of the DB constraint
+    if (!phase) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid construction phase: ${receivedPhase}`
       });
     }
 
 
     if (!projectIdentifier) {
-
       return res.status(400).json({
         success: false,
-        error:
-          'Project is required.'
+        error: 'Project is required.'
       });
     }
 
 
     if (!assigneeId) {
-
       return res.status(400).json({
         success: false,
-        error:
-          'Assignee engineer is required.'
+        error: 'Assignee engineer is required.'
       });
     }
 
 
     if (!dueDate) {
-
       return res.status(400).json({
         success: false,
-        error:
-          'Due date is required.'
+        error: 'Due date is required.'
       });
     }
 
 
     if (!priority) {
-
       return res.status(400).json({
         success: false,
-        error:
-          'Priority is required.'
-      });
-    }
-
-
-    if (!manpowerNeeded) {
-
-      return res.status(400).json({
-        success: false,
-        error:
-          'Manpower needed is required.'
+        error: 'Priority is required.'
       });
     }
 
 
     if (!materialsRequired) {
-
       return res.status(400).json({
         success: false,
-        error:
-          'Materials required is required.'
+        error: 'Materials required is required.'
       });
     }
 
 
     if (!siteInstructions) {
-
       return res.status(400).json({
         success: false,
-        error:
-          'Site instructions are required.'
+        error: 'Site instructions are required.'
       });
     }
 
@@ -1324,7 +1335,6 @@ exports.createTask = async function (req, res) {
 
 
     if (!project) {
-
       return res.status(403).json({
         success: false,
         error:
@@ -1333,8 +1343,7 @@ exports.createTask = async function (req, res) {
     }
 
 
-    const resolvedProjectId =
-      project.id;
+    const resolvedProjectId = project.id;
 
 
     // ============================================================
@@ -1343,9 +1352,7 @@ exports.createTask = async function (req, res) {
 
     const isAssigneeUuid =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-        .test(
-          assigneeId
-        );
+        .test(assigneeId);
 
 
     let userResult;
@@ -1353,62 +1360,46 @@ exports.createTask = async function (req, res) {
 
     if (isAssigneeUuid) {
 
-      userResult =
-        await pool.query(
-          `
+      userResult = await pool.query(
+        `
           SELECT
             id,
             full_name,
             email,
             role
-
           FROM users
-
           WHERE id = $1::uuid
             AND is_active = TRUE
-
           LIMIT 1
-          `,
-          [
-            assigneeId
-          ]
-        );
-
+        `,
+        [assigneeId]
+      );
 
     } else {
 
-      userResult =
-        await pool.query(
-          `
+      userResult = await pool.query(
+        `
           SELECT
             id,
             full_name,
             email,
             role
-
           FROM users
-
           WHERE
             (
               full_name ILIKE $1
               OR email ILIKE $1
             )
-
             AND is_active = TRUE
-
           LIMIT 1
-          `,
-          [
-            assigneeId
-          ]
-        );
+        `,
+        [assigneeId]
+      );
+
     }
 
 
-    if (
-      userResult.rows.length === 0
-    ) {
-
+    if (userResult.rows.length === 0) {
       return res.status(400).json({
         success: false,
         error:
@@ -1417,27 +1408,21 @@ exports.createTask = async function (req, res) {
     }
 
 
-    const assignee =
-      userResult.rows[0];
+    const assignee = userResult.rows[0];
 
 
     // ============================================================
     // ASSIGNEE MUST BELONG TO PROJECT
-    //
-    // Prevent assigning a task to somebody from another project.
     // ============================================================
 
     const membership =
       await pool.query(
         `
-        SELECT id
-
-        FROM project_members
-
-        WHERE project_id = $1
-          AND user_id = $2::uuid
-
-        LIMIT 1
+          SELECT id
+          FROM project_members
+          WHERE project_id = $1
+            AND user_id = $2::uuid
+          LIMIT 1
         `,
         [
           project.code,
@@ -1446,10 +1431,7 @@ exports.createTask = async function (req, res) {
       );
 
 
-    if (
-      membership.rows.length === 0
-    ) {
-
+    if (membership.rows.length === 0) {
       return res.status(400).json({
         success: false,
         error:
@@ -1462,68 +1444,65 @@ exports.createTask = async function (req, res) {
     // CREATE TASK
     // ============================================================
 
+    console.log('======================================');
+    console.log('CREATING TASK');
+    console.log('TASK:', taskName);
+    console.log('PHASE:', phase);
+    console.log('PROJECT:', resolvedProjectId);
+    console.log('ASSIGNEE:', assignee.id);
+    console.log('======================================');
+
+
     const result =
       await pool.query(
         `
-        INSERT INTO tasks
-        (
-          task_name,
+          INSERT INTO tasks
+          (
+            task_name,
+            phase,
+            assignee_id,
+            due_date,
+            priority,
+            materials_required,
+            site_instructions,
+            project_id,
+            status
+          )
 
-          phase,
+          VALUES
+          (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            $6,
+            $7,
+            $8,
+            'Pending'
+          )
 
-          assignee_id,
-
-          due_date,
-
-          priority,
-
-          manpower_needed,
-
-          materials_required,
-
-          site_instructions,
-
-          project_id,
-
-          status
-        )
-
-        VALUES
-        (
-          $1,
-          $2,
-          $3,
-          $4,
-          $5,
-          $6,
-          $7,
-          $8,
-          $9,
-          'Pending'
-        )
-
-        RETURNING *
+          RETURNING *
         `,
         [
           taskName,
-
           phase,
-
           assignee.id,
-
           dueDate,
-
           priority,
-
-          manpowerNeeded,
-
           materialsRequired,
-
           siteInstructions,
-
           resolvedProjectId
         ]
       );
+
+
+    console.log('======================================');
+    console.log('✅ TASK CREATED SUCCESSFULLY');
+    console.log('TASK ID:', result.rows[0].id);
+    console.log('TASK:', result.rows[0].task_name);
+    console.log('PHASE:', result.rows[0].phase);
+    console.log('======================================');
 
 
     return res.status(201).json({
@@ -1545,6 +1524,17 @@ exports.createTask = async function (req, res) {
     console.error('❌ CREATE TASK ERROR');
     console.error('MESSAGE:', err.message);
     console.error('CODE:', err.code);
+
+    console.error(
+      'FRONTEND PHASE:',
+      receivedPhase || req.body?.phase || 'NOT PROVIDED'
+    );
+
+    console.error(
+      'DATABASE PHASE:',
+      phase || 'NOT RESOLVED'
+    );
+
     console.error('USER:', req.user);
     console.error('======================================');
 
@@ -1560,7 +1550,9 @@ exports.createTask = async function (req, res) {
         err.message
 
     });
+
   }
+
 };
 // ─── ASSIGN TASK ──────────────────────────────────────────────────────────────
 exports.assignTask = async function (
