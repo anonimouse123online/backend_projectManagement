@@ -465,6 +465,26 @@ const createProject = async (req, res) => {
       });
     }
 
+    let projectCode = (code || '').trim();
+    if (!projectCode) {
+      const year = new Date().getFullYear();
+      let unique = false;
+      while (!unique) {
+        const rand = Math.floor(1000 + Math.random() * 9000);
+        projectCode = `PRJ-${year}-${rand}`;
+        const check = await pool.query('SELECT 1 FROM projects WHERE code = $1 LIMIT 1', [projectCode]);
+        if (check.rows.length === 0) unique = true;
+      }
+    } else {
+      const existing = await pool.query('SELECT 1 FROM projects WHERE code = $1 LIMIT 1', [projectCode]);
+      if (existing.rows.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Project code "${projectCode}" already exists. Please re-roll or try again.`
+        });
+      }
+    }
+
 
     // Guarantee unique project code & default status to Planning
     const finalCode = await getUniqueProjectCode(code);
@@ -531,11 +551,19 @@ const createProject = async (req, res) => {
         ) AS end_date
       `,
       [
+<<<<<<< HEAD
         finalCode,
         name.trim(),
         location.trim(),
         scope.trim(),
         client.trim(),
+=======
+        projectCode,
+        name,
+        location,
+        scope,
+        client,
+>>>>>>> e1ef62db50f4cf7d8c6a5b613848b0760aef1588
         budget,
         start_date,
         end_date,
