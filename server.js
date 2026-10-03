@@ -97,6 +97,7 @@ app.use(
       'PUT',
       'PATCH',
       'DELETE',
+      'OPTIONS',
     ],
 
     allowedHeaders: [

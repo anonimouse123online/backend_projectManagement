@@ -13,7 +13,10 @@ const loginSignupLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+router.post('/send-verification-code', loginSignupLimiter, authController.sendVerificationCode);
 router.post('/signup', loginSignupLimiter, authController.signup);
+router.post('/verify-email', loginSignupLimiter, authController.verifyEmail);
+router.post('/resend-verification', loginSignupLimiter, authController.resendVerification);
 router.post('/login', loginSignupLimiter, authController.login);
 router.get('/me', verifyToken, authController.getMe);
 router.patch('/profile', verifyToken, authController.updateProfile);

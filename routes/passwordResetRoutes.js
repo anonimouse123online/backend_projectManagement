@@ -41,10 +41,14 @@ async function sendResetOtp(email, code) {
             : "MISSING"
     );
 
+    const templateId =
+        process.env.EMAILJS_PASSWORD_RESET_TEMPLATE_ID ||
+        process.env.EMAILJS_TEMPLATE_ID;
+
     console.log(
         "TEMPLATE ID:",
-        process.env.EMAILJS_TEMPLATE_ID
-            ? process.env.EMAILJS_TEMPLATE_ID
+        templateId
+            ? templateId
             : "MISSING"
     );
 
@@ -64,7 +68,7 @@ async function sendResetOtp(email, code) {
 
     if (
         !process.env.EMAILJS_SERVICE_ID ||
-        !process.env.EMAILJS_TEMPLATE_ID ||
+        !templateId ||
         !process.env.EMAILJS_PUBLIC_KEY
     ) {
 
@@ -80,7 +84,7 @@ async function sendResetOtp(email, code) {
             process.env.EMAILJS_SERVICE_ID,
 
         template_id:
-            process.env.EMAILJS_TEMPLATE_ID,
+            templateId,
 
         user_id:
             process.env.EMAILJS_PUBLIC_KEY,

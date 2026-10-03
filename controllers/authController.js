@@ -1,6 +1,8 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const pool = require('../db');
+const verificationStore = require('../services/verificationStore');
+const { sendVerificationCodeEmail } = require('../services/emailService');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const SALT_ROUNDS = 10;
@@ -12,12 +14,9 @@ if (!JWT_SECRET) {
 
 
 // ─── ROLE NORMALIZER ──────────────────────────────────────────
-// Database only accepts:
-// admin
-// engineer
-
+// Database accepts: admin, engineer
 const normalizeRole = (role) => {
-  if (!role) return null;
+  if (!role) return 'engineer';
 
   const normalized = role.trim().toLowerCase();
 
@@ -33,49 +32,77 @@ const normalizeRole = (role) => {
     return 'engineer';
   }
 
-  return null;
+  return 'engineer';
+};
+
+
+// ─── SEND VERIFICATION CODE ────────────────────────────────────
+exports.sendVerificationCode = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email || typeof email !== 'string' || !email.trim()) {
+      return res.status(400).json({
+        error: 'Email address is required.',
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(normalizedEmail)) {
+      return res.status(400).json({
+        error: 'Invalid email address format.',
+      });
+    }
+
+    // Rate-limiting / cooldown check (60 seconds)
+    const { allowed, secondsRemaining } = verificationStore.canResend(normalizedEmail);
+    if (!allowed) {
+      return res.status(400).json({
+        error: `Please wait ${secondsRemaining} seconds before requesting a new verification code.`,
+      });
+    }
+
+    // Generate random 6-digit numeric verification code (e.g. "482910")
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+
+    // Store securely in memory with 15-minute expiration (900,000 ms)
+    verificationStore.setCode(normalizedEmail, code, 15 * 60 * 1000);
+
+    // Send email to user using EmailJS REST API
+    await sendVerificationCodeEmail(normalizedEmail, code);
+
+    return res.status(200).json({
+      message: 'Verification code sent! Please check your email inbox.',
+    });
+  } catch (error) {
+    console.error('sendVerificationCode error:', error.message);
+    return res.status(500).json({
+      error: 'Failed to send verification code email.',
+    });
+  }
 };
 
 
 // ─── SIGNUP ───────────────────────────────────────────────────
 exports.signup = async (req, res) => {
   try {
-    const { name, email, password, role } = req.body;
+    const { name, email, verificationCode, password, role } = req.body;
 
-    console.log('Signup payload received:', {
-      name,
-      email,
-      role,
-    });
+    console.log('Signup request received for email:', email);
 
-    if (!email || !password || !role) {
+    // 1. Check required fields
+    if (!name || !email || !password) {
       return res.status(400).json({
-        error: 'Email, password, and role are required.',
+        error: 'Name, email, and password are required.',
       });
     }
 
-    // Normalize email
     const normalizedEmail = email.trim().toLowerCase();
 
-    // Normalize role
-    const normalizedRole = normalizeRole(role);
-
-    if (!normalizedRole) {
-      return res.status(400).json({
-        error: 'Invalid role. Only Admin and Engineer are allowed.',
-      });
-    }
-
-    console.log(
-      `Normalized signup role: ${role} -> ${normalizedRole}`
-    );
-
-    // Use name if provided, otherwise derive from email
-    const fullName =
-      name?.trim() ||
-      normalizedEmail.split('@')[0];
-
-    // Check if email already exists
+    // 2. Check if user with this email already exists
     const existing = await pool.query(
       `
       SELECT id
@@ -86,32 +113,46 @@ exports.signup = async (req, res) => {
     );
 
     if (existing.rows.length > 0) {
-      return res.status(409).json({
-        error: 'Email already registered.',
+      return res.status(400).json({
+        error: 'Email is already registered.',
       });
     }
 
-    // Hash password
-    const password_hash = await bcrypt.hash(
-      password,
-      SALT_ROUNDS
-    );
+    let isEmailVerified = false;
 
-    // Create user
+    // 3. Verify OTP code if provided during registration
+    if (verificationCode) {
+      const verifyResult = verificationStore.verifyCode(normalizedEmail, verificationCode);
+      if (!verifyResult.valid) {
+        return res.status(400).json({
+          error: verifyResult.reason || 'Invalid verification code.',
+        });
+      }
+      isEmailVerified = true;
+    }
+
+    // 4. Hash password securely (bcrypt with salt rounds = 10)
+    const password_hash = await bcrypt.hash(password, SALT_ROUNDS);
+    const normalizedRole = normalizeRole(role);
+    const fullName = name.trim();
+
+    // 5. Save user in database
     const result = await pool.query(
       `
       INSERT INTO users (
         full_name,
         email,
         password_hash,
-        role
+        role,
+        email_verified
       )
-      VALUES ($1, $2, $3, $4)
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING
         id,
         full_name,
         email,
         role,
+        email_verified,
         created_at
       `,
       [
@@ -119,26 +160,148 @@ exports.signup = async (req, res) => {
         normalizedEmail,
         password_hash,
         normalizedRole,
+        isEmailVerified,
       ]
     );
 
     const user = result.rows[0];
 
+    // 6. Invalidate verification code if used
+    if (isEmailVerified) {
+      verificationStore.deleteCode(normalizedEmail);
+    }
+
     return res.status(201).json({
-      message: 'User created successfully!',
+      message: 'Registration successful.',
       user: {
         id: user.id,
         name: user.full_name,
         email: user.email,
         role: user.role,
+        emailVerified: user.email_verified,
       },
     });
 
   } catch (error) {
-    console.error('Signup error:', error);
-
+    console.error('Signup error:', error.message);
     return res.status(500).json({
       error: 'Error during signup.',
+    });
+  }
+};
+
+
+// ─── VERIFY EMAIL ──────────────────────────────────────────────
+exports.verifyEmail = async (req, res) => {
+  try {
+    const { email, code } = req.body;
+
+    if (!email || !code) {
+      return res.status(400).json({
+        error: 'Email and verification code are required.',
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    // 1. Verify user exists in database
+    const userRes = await pool.query(
+      `
+      SELECT id, email_verified
+      FROM users
+      WHERE email = $1
+      `,
+      [normalizedEmail]
+    );
+
+    if (userRes.rows.length === 0) {
+      return res.status(400).json({
+        error: 'User not found with this email address.',
+      });
+    }
+
+    if (userRes.rows[0].email_verified) {
+      return res.status(200).json({
+        message: 'Email is already verified.',
+      });
+    }
+
+    // 2. Verify code and expiration (15 minutes)
+    const verifyResult = verificationStore.verifyCode(normalizedEmail, code);
+    if (!verifyResult.valid) {
+      return res.status(400).json({
+        error: verifyResult.reason || 'Invalid verification code.',
+      });
+    }
+
+    // 3. Mark user email_verified = TRUE in database
+    await pool.query(
+      `
+      UPDATE users
+      SET
+        email_verified = TRUE,
+        verification_code_hash = NULL,
+        verification_code_expires_at = NULL,
+        updated_at = NOW()
+      WHERE email = $1
+      `,
+      [normalizedEmail]
+    );
+
+    // 4. Clear used code from memory
+    verificationStore.deleteCode(normalizedEmail);
+
+    return res.status(200).json({
+      message: 'Email verified successfully.',
+    });
+
+  } catch (error) {
+    console.error('verifyEmail error:', error.message);
+    return res.status(500).json({
+      error: 'Failed to verify email address.',
+    });
+  }
+};
+
+
+// ─── RESEND VERIFICATION CODE ──────────────────────────────────
+exports.resendVerification = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email || typeof email !== 'string' || !email.trim()) {
+      return res.status(400).json({
+        error: 'Email address is required.',
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    // 1. Rate-limiting cooldown check (60 seconds)
+    const { allowed, secondsRemaining } = verificationStore.canResend(normalizedEmail);
+    if (!allowed) {
+      return res.status(400).json({
+        error: `Please wait ${secondsRemaining} seconds before requesting a new verification code.`,
+      });
+    }
+
+    // 2. Generate new 6-digit verification code
+    const newCode = Math.floor(100000 + Math.random() * 900000).toString();
+
+    // 3. Store new code with reset 15-minute expiration
+    verificationStore.setCode(normalizedEmail, newCode, 15 * 60 * 1000);
+
+    // 4. Send email via EmailJS REST API
+    await sendVerificationCodeEmail(normalizedEmail, newCode);
+
+    return res.status(200).json({
+      message: 'Verification code sent! Please check your email inbox.',
+    });
+
+  } catch (error) {
+    console.error('resendVerification error:', error.message);
+    return res.status(500).json({
+      error: 'Failed to resend verification code.',
     });
   }
 };
