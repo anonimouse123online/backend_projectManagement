@@ -1,594 +1,228 @@
 const pool = require('../db');
+const service = require('../services/projectIssueService');
 
+const issueSelect = `SELECT i.*, ru.full_name AS reporter_name, ru.role AS reporter_role,
+  au.full_name AS assignee_name, au.role AS assignee_role
+  FROM project_issues i LEFT JOIN users ru ON ru.id = i.reported_by
+  LEFT JOIN users au ON au.id = i.assigned_to`;
+const referenceOf = req => req.params.projectId || req.params.code;
+const idOf = req => req.params.issueId || req.params.id;
+const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 
-// ============================================================
-// GET PROJECT ISSUES
-// GET /projects/:projectId/issues
-// ============================================================
+function fail(res, error) {
+  if (error instanceof service.IssueError) return res.status(error.status).json({ success: false, message: error.message });
+  console.error('Project issue error:', error);
+  return res.status(500).json({ success: false, message: 'Failed to process project issue.' });
+}
+
+function authenticated(req) {
+  if (!req.user?.id) throw new service.IssueError(401, 'Authentication required.');
+}
+
+function text(value, field, required = false, max = Infinity) {
+  if (typeof value !== 'string' || (required && !value.trim()) || value.length > max) {
+    throw new service.IssueError(400, `Invalid ${field}.`);
+  }
+  return value.trim();
+}
+
+function enumValue(value, values, field) {
+  const normalized = service.normalize(value);
+  if (!values.includes(normalized)) throw new service.IssueError(400, `Invalid ${field}. Must be one of: ${values.join(', ')}.`);
+  return normalized;
+}
+
+function severityOf(body, fallback) {
+  if (own(body, 'severity') && own(body, 'priority') && service.normalize(body.severity) !== service.normalize(body.priority)) {
+    throw new service.IssueError(400, 'severity and priority must agree.');
+  }
+  return enumValue(own(body, 'severity') ? body.severity : own(body, 'priority') ? body.priority : fallback,
+    service.SEVERITIES, 'severity');
+}
+
+async function validateAssignee(assignedTo, project, db) {
+  if (assignedTo === null) return;
+  if (!service.UUID.test(assignedTo || '')) throw new service.IssueError(400, 'Invalid assigned_to.');
+  const { rows } = await db.query(`SELECT u.id FROM users u WHERE u.id = $1 AND
+    (u.id = $2 OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = $3
+      AND (pm.user_id = u.id OR lower(trim(pm.user_name)) = lower(trim(u.email)))))`,
+  [assignedTo, project.owner_id, project.code]);
+  if (!rows.length) throw new service.IssueError(400, 'Assignee must belong to the project.');
+}
+
+async function locateIssue(req, db) {
+  const id = idOf(req);
+  if (!service.UUID.test(id || '')) throw new service.IssueError(400, 'Invalid issue ID.');
+  let project;
+  if (referenceOf(req)) project = await service.getProject(referenceOf(req), req.user, db);
+  const { rows } = await db.query(`${issueSelect} WHERE i.id = $1${project ? ' AND i.project_id = $2' : ''}`,
+    project ? [id, project.id] : [id]);
+  if (!rows.length) throw new service.IssueError(404, 'Issue not found.');
+  project ||= await service.getProject(rows[0].project_id, req.user, db);
+  return { issue: rows[0], project };
+}
+
+// Socket errors must never turn a committed issue into a failed HTTP response.
+async function publish(req, project, counts, notification) {
+  try { await service.publishChange(req, project, counts, notification); }
+  catch (error) { console.warn('Project issue socket update failed:', error.message); }
+}
+
+async function rollback(client) {
+  try { await client.query('ROLLBACK'); }
+  catch (error) { console.error('Project issue rollback failed:', error.message); }
+}
+
 exports.getProjectIssues = async (req, res) => {
   try {
-    const { projectId } = req.params;
-
-    const {
-      status,
-      category,
-      priority,
-      search
-    } = req.query;
-
-    let query = `
-      SELECT
-        i.id,
-        p.project_code,
-        i.title,
-        i.category,
-        i.priority,
-        i.location,
-        i.description,
-        i.status,
-        i.resolution_notes,
-        i.assigned_to,
-        i.created_at,
-        i.updated_at,
-        i.resolved_at,
-
-        creator.full_name AS reporter_name,
-        assignee.full_name AS assignee_name
-
-      FROM issues i
-
-      JOIN projects p
-        ON p.id = i.project_id
-
-      LEFT JOIN users creator
-        ON creator.id = i.created_by
-
-      LEFT JOIN users assignee
-        ON assignee.id = i.assigned_to
-
-      WHERE p.project_code = $1
-    `;
-
-    const values = [projectId];
-    let index = 2;
-
-
-    if (status) {
-      query += ` AND i.status = $${index}`;
-      values.push(status);
-      index++;
+    authenticated(req);
+    const query = req.query;
+    // Keep the legacy unfiltered response; status=active returns unresolved issues.
+    const status = query.status === undefined ? 'all' : service.normalize(query.status);
+    if (!['all', 'active', ...service.STATUSES].includes(status)) throw new service.IssueError(400, 'Invalid status filter.');
+    const filters = [];
+    const params = [];
+    if (status === 'active') filters.push("i.status IN ('open', 'in_progress')");
+    else if (status !== 'all') { params.push(status); filters.push(`i.status = $${params.length + 1}`); }
+    if (query.category !== undefined && query.category !== 'All') {
+      params.push(text(query.category, 'category', true, 100));
+      filters.push(`lower(i.category) = lower($${params.length + 1})`);
     }
-
-
-    if (category) {
-      query += ` AND i.category = $${index}`;
-      values.push(category);
-      index++;
+    if ((query.severity !== undefined || query.priority !== undefined) && query.severity !== 'All' && query.priority !== 'All') {
+      params.push(severityOf(query)); filters.push(`i.severity = $${params.length + 1}`);
     }
-
-
-    if (priority) {
-      query += ` AND i.priority = $${index}`;
-      values.push(priority);
-      index++;
+    if (query.search !== undefined) {
+      params.push(`%${text(query.search, 'search')}%`);
+      filters.push(`(i.title ILIKE $${params.length + 1} OR i.description ILIKE $${params.length + 1} OR i.location ILIKE $${params.length + 1})`);
     }
-
-
-    if (search) {
-      query += `
-        AND (
-          i.title ILIKE $${index}
-          OR i.description ILIKE $${index}
-          OR COALESCE(i.location, '') ILIKE $${index}
-        )
-      `;
-
-      values.push(`%${search}%`);
-      index++;
-    }
-
-
-    query += `
-      ORDER BY i.created_at DESC
-    `;
-
-
-    const { rows } =
-      await pool.query(
-        query,
-        values
-      );
-
-
-    return res.json({
-      success: true,
-      data: rows
-    });
-
-  } catch (err) {
-
-    console.error(
-      'getProjectIssues error:',
-      err
-    );
-
-    return res.status(500).json({
-      success: false,
-      message: err.message,
-      code: err.code
-    });
-  }
+    const project = await service.getProject(referenceOf(req), req.user);
+    // One statement gives issues and the unfiltered active count the same snapshot.
+    const { rows } = await pool.query(`SELECT
+      (SELECT COUNT(*)::int FROM project_issues WHERE project_id = $1 AND status IN ('open', 'in_progress')) AS active_issue_count,
+      COALESCE((SELECT jsonb_agg(to_jsonb(found) ORDER BY found.status_order, found.created_at DESC, found.id)
+        FROM (SELECT enriched.*, CASE enriched.status WHEN 'open' THEN 1 WHEN 'in_progress' THEN 2 ELSE 3 END AS status_order
+          FROM (${issueSelect} WHERE i.project_id = $1 ${filters.map(filter => `AND ${filter}`).join(' ')}) enriched) found), '[]'::jsonb) AS issues`,
+    [project.id, ...params]);
+    const issues = rows[0].issues.map(({ status_order, ...issue }) => issue);
+    return res.status(200).json({ success: true, project_id: project.id,
+      active_issue_count: rows[0].active_issue_count, has_active_issues: rows[0].active_issue_count > 0,
+      issues, data: issues });
+  } catch (error) { return fail(res, error); }
 };
 
-
-
-// ============================================================
-// CREATE ISSUE
-// POST /projects/:projectId/issues
-// ============================================================
 exports.createIssue = async (req, res) => {
+  let client;
+  let transaction = false;
   try {
-
-    const { projectId } =
-      req.params;
-
-
-    const {
-      title,
-      category,
-      priority,
-      location,
-      description,
-      assigned_to
-    } = req.body;
-
-
-    if (
-      !title?.trim() ||
-      !description?.trim()
-    ) {
-
-      return res.status(400).json({
-        success: false,
-        message:
-          'Title and description are required.'
-      });
+    authenticated(req);
+    const body = req.body || {};
+    const title = text(body.title, 'title', true, 255);
+    const description = text(body.description, 'description', true);
+    // Category names remain extensible, preserving existing report categories.
+    const category = body.category === undefined ? 'other' : text(body.category, 'category', true, 100);
+    const severity = severityOf(body, 'medium');
+    if (own(body, 'status') && enumValue(body.status, service.STATUSES, 'status') !== 'open') {
+      throw new service.IssueError(400, 'New issues must have status open.');
     }
-
-
-    // ========================================================
-    // FIND PROJECT UUID USING PROJECT CODE
-    // ========================================================
-
-    const projectResult =
-      await pool.query(
-        `
-        SELECT id
-        FROM projects
-        WHERE project_code = $1
-        `,
-        [projectId]
-      );
-
-
-    if (
-      projectResult.rows.length === 0
-    ) {
-
-      return res.status(404).json({
-        success: false,
-        message:
-          'Project not found.'
-      });
-    }
-
-
-    const projectUuid =
-      projectResult.rows[0].id;
-
-
-    const createdBy =
-      req.user?.id || null;
-
-
-    const { rows } =
-      await pool.query(
-        `
-        INSERT INTO issues (
-          project_id,
-          title,
-          category,
-          priority,
-          location,
-          description,
-          status,
-          created_by,
-          assigned_to
-        )
-
-        VALUES (
-          $1,
-          $2,
-          $3,
-          $4,
-          $5,
-          $6,
-          'Open',
-          $7,
-          $8
-        )
-
-        RETURNING *
-        `,
-        [
-          projectUuid,
-          title.trim(),
-          category || null,
-          priority || 'Medium',
-          location?.trim() || null,
-          description.trim(),
-          createdBy,
-          assigned_to || null
-        ]
-      );
-
-
-    return res
-      .status(201)
-      .json({
-        success: true,
-        data: rows[0]
-      });
-
-  } catch (err) {
-
-    console.error(
-      'createIssue error:',
-      err
-    );
-
-
-    return res
-      .status(500)
-      .json({
-        success: false,
-        message: err.message,
-        code: err.code
-      });
-  }
+    const location = body.location == null ? null : text(body.location, 'location', false, 255);
+    client = await pool.connect();
+    await client.query('BEGIN'); transaction = true;
+    const project = await service.getProject(referenceOf(req), req.user, client);
+    service.requireWrite(project, req.user);
+    // Serialize mutations per project so concurrent submissions see committed counts.
+    await client.query('SELECT id FROM projects WHERE id = $1 FOR UPDATE', [project.id]);
+    if (own(body, 'project_id') && body.project_id !== project.id) throw new service.IssueError(400, 'project_id does not match the URL project.');
+    const assignedTo = body.assigned_to ?? null;
+    await validateAssignee(assignedTo, project, client);
+    const { rows } = await client.query(`INSERT INTO project_issues
+      (project_id, project_code, title, description, category, severity, priority, status, reported_by, location, assigned_to)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8, $9, $10) RETURNING *`,
+    [project.id, project.code, title, description, category, severity,
+      severity[0].toUpperCase() + severity.slice(1), req.user.id, location, assignedTo]);
+    const notificationResult = await client.query(`INSERT INTO notifications
+      (title, message, audience, project_id, created_by)
+      VALUES ('New Project Issue', $1, 'project', $2, $3) RETURNING *`,
+    [`${project.name} has a new issue: ${title}.`, project.code, req.user.id]);
+    const counts = await service.getCounts(project.id, client);
+    await client.query('COMMIT'); transaction = false;
+    client.release(); client = null;
+    await publish(req, project, counts, notificationResult.rows[0]);
+    return res.status(201).json({ success: true, message: 'Issue reported successfully.',
+      project_id: project.id, ...counts, data: rows[0] });
+  } catch (error) {
+    if (transaction) await rollback(client);
+    return fail(res, error);
+  } finally { client?.release(); }
 };
 
-
-
-// ============================================================
-// GET SINGLE ISSUE
-// GET /issues/:id
-// ============================================================
 exports.getIssueById = async (req, res) => {
   try {
-
-    const { id } =
-      req.params;
-
-
-    const { rows } =
-      await pool.query(
-        `
-        SELECT
-          i.*,
-
-          creator.full_name
-            AS reporter_name,
-
-          assignee.full_name
-            AS assignee_name
-
-        FROM issues i
-
-        LEFT JOIN users creator
-          ON creator.id = i.created_by
-
-        LEFT JOIN users assignee
-          ON assignee.id = i.assigned_to
-
-        WHERE i.id = $1
-        `,
-        [id]
-      );
-
-
-    if (
-      rows.length === 0
-    ) {
-
-      return res
-        .status(404)
-        .json({
-          success: false,
-          message:
-            'Issue not found.'
-        });
-    }
-
-
-    return res.json({
-      success: true,
-      data: rows[0]
-    });
-
-  } catch (err) {
-
-    console.error(
-      'getIssueById error:',
-      err
-    );
-
-
-    return res
-      .status(500)
-      .json({
-        success: false,
-        message: err.message
-      });
-  }
+    authenticated(req);
+    const { issue } = await locateIssue(req, pool);
+    return res.status(200).json({ success: true, data: issue });
+  } catch (error) { return fail(res, error); }
 };
 
-
-
-// ============================================================
-// UPDATE ISSUE
-// PATCH /projects/:projectId/issues/:id
-// ============================================================
 exports.updateIssue = async (req, res) => {
+  let client;
+  let transaction = false;
   try {
-
-    const {
-      projectId,
-      id
-    } = req.params;
-
-
-    const {
-      title,
-      category,
-      description,
-      status,
-      priority,
-      location,
-      assigned_to,
-      resolution_notes
-    } = req.body;
-
-
-    // Verify project
-    const projectResult =
-      await pool.query(
-        `
-        SELECT id
-        FROM projects
-        WHERE project_code = $1
-        `,
-        [projectId]
-      );
-
-
-    if (
-      projectResult.rows.length === 0
-    ) {
-
-      return res
-        .status(404)
-        .json({
-          success: false,
-          message:
-            'Project not found.'
-        });
+    authenticated(req);
+    const body = req.body || {};
+    const changes = [];
+    const values = [];
+    const add = (key, value) => { values.push(value); changes.push(`${key} = $${values.length}`); };
+    for (const [key, max, required] of [['title', 255, true], ['description', Infinity, true], ['category', 100, true], ['location', 255, false], ['resolution_notes', Infinity, false]]) {
+      if (own(body, key)) add(key, body[key] === null && !required ? null : text(body[key], key, required, max));
     }
-
-
-    const projectUuid =
-      projectResult.rows[0].id;
-
-
-    const { rows } =
-      await pool.query(
-        `
-        UPDATE issues
-
-        SET
-          title =
-            COALESCE($1, title),
-
-          category =
-            COALESCE($2, category),
-
-          description =
-            COALESCE($3, description),
-
-          status =
-            COALESCE($4, status),
-
-          priority =
-            COALESCE($5, priority),
-
-          location =
-            COALESCE($6, location),
-
-          assigned_to =
-            COALESCE($7, assigned_to),
-
-          resolution_notes =
-            COALESCE(
-              $8,
-              resolution_notes
-            ),
-
-          resolved_at =
-            CASE
-              WHEN $4 = 'Resolved'
-              THEN COALESCE(
-                resolved_at,
-                NOW()
-              )
-
-              WHEN $4 IS NOT NULL
-                AND $4 <> 'Resolved'
-              THEN NULL
-
-              ELSE resolved_at
-            END,
-
-          updated_at = NOW()
-
-        WHERE id = $9
-          AND project_id = $10
-
-        RETURNING *
-        `,
-        [
-          title ?? null,
-          category ?? null,
-          description ?? null,
-          status ?? null,
-          priority ?? null,
-          location ?? null,
-          assigned_to ?? null,
-          resolution_notes ?? null,
-          id,
-          projectUuid
-        ]
-      );
-
-
-    if (
-      rows.length === 0
-    ) {
-
-      return res
-        .status(404)
-        .json({
-          success: false,
-          message:
-            'Issue not found.'
-        });
-    }
-
-
-    return res.json({
-      success: true,
-      data: rows[0]
-    });
-
-  } catch (err) {
-
-    console.error(
-      'updateIssue error:',
-      err
-    );
-
-
-    return res
-      .status(500)
-      .json({
-        success: false,
-        message: err.message,
-        code: err.code
-      });
-  }
+    if (own(body, 'status')) add('status', enumValue(body.status, service.STATUSES, 'status'));
+    if (own(body, 'severity') || own(body, 'priority')) add('severity', severityOf(body));
+    if (own(body, 'assigned_to')) add('assigned_to', body.assigned_to);
+    if (own(body, 'project_id')) throw new service.IssueError(400, 'An issue cannot be moved to another project.');
+    if (!changes.length) throw new service.IssueError(400, 'No update fields provided.');
+    client = await pool.connect();
+    await client.query('BEGIN'); transaction = true;
+    const { issue, project } = await locateIssue(req, client);
+    service.requireWrite(project, req.user);
+    await client.query('SELECT id FROM projects WHERE id = $1 FOR UPDATE', [project.id]);
+    if (own(body, 'assigned_to')) await validateAssignee(body.assigned_to, project, client);
+    values.push(issue.id, project.id);
+    const { rows } = await client.query(`UPDATE project_issues SET ${changes.join(', ')}, updated_at = NOW()
+      WHERE id = $${values.length - 1} AND project_id = $${values.length} RETURNING *`, values);
+    if (!rows.length) throw new service.IssueError(404, 'Issue not found.');
+    const counts = await service.getCounts(project.id, client);
+    await client.query('COMMIT'); transaction = false;
+    client.release(); client = null;
+    await publish(req, project, counts);
+    return res.status(200).json({ success: true, message: 'Issue updated successfully.',
+      project_id: project.id, ...counts, data: rows[0] });
+  } catch (error) {
+    if (transaction) await rollback(client);
+    return fail(res, error);
+  } finally { client?.release(); }
 };
 
-
-
-// ============================================================
-// DELETE ISSUE
-// DELETE /projects/:projectId/issues/:id
-// ============================================================
 exports.deleteIssue = async (req, res) => {
+  let client;
+  let transaction = false;
   try {
-
-    const {
-      projectId,
-      id
-    } = req.params;
-
-
-    const projectResult =
-      await pool.query(
-        `
-        SELECT id
-        FROM projects
-        WHERE project_code = $1
-        `,
-        [projectId]
-      );
-
-
-    if (
-      projectResult.rows.length === 0
-    ) {
-
-      return res
-        .status(404)
-        .json({
-          success: false,
-          message:
-            'Project not found.'
-        });
+    authenticated(req);
+    client = await pool.connect();
+    await client.query('BEGIN'); transaction = true;
+    const { issue, project } = await locateIssue(req, client);
+    if (!service.isAdmin(req.user) && project.owner_id !== req.user.id) {
+      throw new service.IssueError(403, 'Only the project owner or admin can delete issues.');
     }
-
-
-    const projectUuid =
-      projectResult.rows[0].id;
-
-
-    const { rowCount } =
-      await pool.query(
-        `
-        DELETE FROM issues
-
-        WHERE id = $1
-          AND project_id = $2
-        `,
-        [
-          id,
-          projectUuid
-        ]
-      );
-
-
-    if (
-      rowCount === 0
-    ) {
-
-      return res
-        .status(404)
-        .json({
-          success: false,
-          message:
-            'Issue not found.'
-        });
-    }
-
-
-    return res.json({
-      success: true,
-      message:
-        'Issue deleted successfully.'
-    });
-
-  } catch (err) {
-
-    console.error(
-      'deleteIssue error:',
-      err
-    );
-
-
-    return res
-      .status(500)
-      .json({
-        success: false,
-        message: err.message
-      });
-  }
+    await client.query('SELECT id FROM projects WHERE id = $1 FOR UPDATE', [project.id]);
+    const { rowCount } = await client.query('DELETE FROM project_issues WHERE id = $1 AND project_id = $2', [issue.id, project.id]);
+    if (!rowCount) throw new service.IssueError(404, 'Issue not found.');
+    const counts = await service.getCounts(project.id, client);
+    await client.query('COMMIT'); transaction = false;
+    client.release(); client = null;
+    await publish(req, project, counts);
+    return res.status(200).json({ success: true, message: 'Issue deleted successfully.', project_id: project.id, ...counts });
+  } catch (error) {
+    if (transaction) await rollback(client);
+    return fail(res, error);
+  } finally { client?.release(); }
 };

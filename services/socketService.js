@@ -21,6 +21,8 @@ function initializeSocket(server) {
   // CONNECTION
   // ==========================================================
 
+  require('./projectIssueService').initializeIssueSocket(io);
+
   io.on(
     'connection',
     (socket) => {

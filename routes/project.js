@@ -80,6 +80,8 @@ router.post('/:code/progress',               logProjectProgress);
 router.get('/:code/issues',                  getProjectIssues);
 router.post('/:code/issues',                 createProjectIssue);
 router.patch('/:code/issues/:issueId',       updateProjectIssue);
+router.put('/:code/issues/:issueId',         updateProjectIssue);
+router.delete('/:code/issues/:issueId',      require('../controllers/issuesController').deleteIssue);
 
 router.get('/:code/reports',                 getProjectReports);
 router.post('/:code/reports',                createProjectReport);

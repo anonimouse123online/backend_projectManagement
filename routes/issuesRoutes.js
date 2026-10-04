@@ -14,6 +14,7 @@ router.post('/projects/:projectId/issues', createIssue);
 
 router.get('/issues/:id', getIssueById);
 router.put('/issues/:id', updateIssue);
+router.patch('/issues/:id', updateIssue);
 router.delete('/issues/:id', deleteIssue);
 
 module.exports = router;

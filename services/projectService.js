@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { countColumns, countJoin, isAdmin } = require('./projectIssueService');
 
 
 // ============================================================
@@ -19,7 +20,8 @@ const getAll = async (
   search,
   code,
   userId,
-  userEmail
+  userEmail,
+  userRole
 ) => {
 
   if (!userId) {
@@ -32,7 +34,8 @@ const getAll = async (
 
   const params = [
     userId,
-    userEmail || null
+    userEmail || null,
+    isAdmin({ role: userRole })
   ];
 
 
@@ -44,7 +47,7 @@ const getAll = async (
 
   conditions.push(`
     (
-      p.owner_id = $1::uuid
+      $3::boolean OR p.owner_id = $1::uuid
 
       OR EXISTS (
         SELECT 1
@@ -150,6 +153,7 @@ const getAll = async (
     SELECT
 
       p.id,
+      ${countColumns},
 
       p.code,
 
@@ -236,6 +240,7 @@ const getAll = async (
 
 
     FROM projects p
+    ${countJoin}
 
 
     ${where}
@@ -320,7 +325,8 @@ const getAll = async (
 const getByCode = async (
   code,
   userId,
-  userEmail
+  userEmail,
+  userRole
 ) => {
 
   if (!userId) {
@@ -339,6 +345,7 @@ const getByCode = async (
         SELECT
 
           p.id,
+          ${countColumns},
 
           p.code,
 
@@ -428,6 +435,7 @@ const getByCode = async (
 
 
         FROM projects p
+        ${countJoin}
 
 
         WHERE p.code ILIKE $1
@@ -435,7 +443,7 @@ const getByCode = async (
 
           AND (
 
-            p.owner_id = $2::uuid
+            $4::boolean OR p.owner_id = $2::uuid
 
 
             OR EXISTS (
@@ -487,7 +495,8 @@ const getByCode = async (
         [
           code,
           userId,
-          userEmail || null
+          userEmail || null,
+          isAdmin({ role: userRole })
         ]
       );
 

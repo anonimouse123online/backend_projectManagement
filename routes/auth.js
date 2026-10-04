@@ -3,6 +3,7 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const authController = require('../controllers/authController');
 const { verifyToken } = require('../middlewares/authMiddleware');
+const loginSecurityController = require('../controllers/loginSecurityController');
 
 // Brute-force protection specifically for login and signup attempts
 const loginSignupLimiter = rateLimit({
@@ -18,6 +19,7 @@ router.post('/signup', loginSignupLimiter, authController.signup);
 router.post('/verify-email', loginSignupLimiter, authController.verifyEmail);
 router.post('/resend-verification', loginSignupLimiter, authController.resendVerification);
 router.post('/login', loginSignupLimiter, authController.login);
+router.post('/logout', verifyToken, loginSecurityController.requireActiveSecurityUser, loginSecurityController.logout);
 router.get('/me', verifyToken, authController.getMe);
 router.patch('/profile', verifyToken, authController.updateProfile);
 router.patch('/change-password', verifyToken, authController.changePassword);

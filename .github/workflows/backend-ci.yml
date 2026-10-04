@@ -1,0 +1,90 @@
+name: Backend CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-ci:
+    name: Backend CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: backend_ci
+          POSTGRES_DB: backend_ci
+          # Disposable CI database only; no stored password or production access.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U backend_ci -d backend_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      NODE_ENV: test
+      DB_HOST: 127.0.0.1
+      DB_PORT: '5432'
+      DB_NAME: backend_ci
+      DB_USER: backend_ci
+      DB_PASSWORD: ''
+      PORT: '5001'
+      CORS_ORIGIN: http://localhost:5173
+      TRUSTED_PROXY_CIDRS: ''
+      AI_SERVICE_URL: http://127.0.0.1:8000
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          # firebase-admin in package-lock.json requires Node >=22.
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Prepare isolated test configuration
+        shell: bash
+        run: |
+          # .env is currently tracked. Never load it or Firebase credentials in CI.
+          rm -f .env configuration/firebase-service-account.json
+          jwt_secret="$(node -p "require('node:crypto').randomBytes(32).toString('hex')")"
+          echo "::add-mask::$jwt_secret"
+          echo "JWT_SECRET=$jwt_secret" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check JavaScript syntax
+        run: node .github/scripts/backend-check.cjs syntax
+
+      - name: Lint if configured
+        run: npm run lint --if-present
+
+      - name: Build if configured
+        run: npm run build --if-present
+
+      - name: Run existing automated tests
+        run: node .github/scripts/backend-check.cjs tests
+
+      - name: Validate backend startup and imports
+        timeout-minutes: 1
+        run: node .github/scripts/backend-check.cjs startup

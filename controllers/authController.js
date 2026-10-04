@@ -3,6 +3,8 @@ const bcrypt = require('bcryptjs');
 const pool = require('../db');
 const verificationStore = require('../services/verificationStore');
 const { sendVerificationCodeEmail } = require('../services/emailService');
+const { validateSecurityContext } = require('../services/loginSecurityContext');
+const { recordLoginSecurityEventSafely } = require('../services/loginSecurityService');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const SALT_ROUNDS = 10;
@@ -310,15 +312,18 @@ exports.resendVerification = async (req, res) => {
 // ─── LOGIN ────────────────────────────────────────────────────
 exports.login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, security_context } = req.body || {};
 
-    if (!email || !password) {
+    if (typeof email !== 'string' || !email.trim() || email.trim().length > 255 ||
+        // eslint-disable-next-line no-control-regex -- Reject ASCII control characters in email input.
+        /[\x00-\x1f\x7f]/.test(email) || typeof password !== 'string' || !password) {
       return res.status(400).json({
         error: 'Email and password are required.',
       });
     }
 
     const normalizedEmail = email.trim().toLowerCase();
+    const context = validateSecurityContext(security_context, req.headers['user-agent']);
 
     const result = await pool.query(
       `
@@ -333,6 +338,7 @@ exports.login = async (req, res) => {
     const user = result.rows[0];
 
     if (!user) {
+      await recordLoginSecurityEventSafely({ req, email: normalizedEmail, context, eventType: 'LOGIN_FAILED' });
       return res.status(401).json({
         error: 'Invalid credentials.',
       });
@@ -345,10 +351,15 @@ exports.login = async (req, res) => {
     );
 
     if (!match) {
+      await recordLoginSecurityEventSafely({ req, user, email: normalizedEmail, context, eventType: 'LOGIN_FAILED' });
       return res.status(401).json({
         error: 'Invalid credentials.',
       });
     }
+
+    const security = await recordLoginSecurityEventSafely({
+      req, user, email: normalizedEmail, context, eventType: 'LOGIN_SUCCESS',
+    });
 
     // Create JWT
     const token = jwt.sign(
@@ -373,6 +384,10 @@ exports.login = async (req, res) => {
       message: 'Login successful.',
       token,
       redirectTo,
+      security_status: security.security_status,
+      security_flag: security.security_flag,
+      security_reason: security.security_reason,
+      security_audit_available: security.security_audit_available,
       user: {
         id: user.id,
         name: user.full_name,
@@ -382,7 +397,10 @@ exports.login = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Login error:', error);
+    if (error.status === 400) {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error('Login error:', error.code || 'LOGIN_ERROR');
 
     return res.status(500).json({
       error: 'Error during login.',
@@ -655,7 +673,7 @@ exports.getSystemHealth = async (req, res) => {
         `
         SELECT COUNT(*)
         FROM project_issues
-        WHERE status != 'Resolved'
+        WHERE status IN ('open', 'in_progress')
         `
       ),
     ]);

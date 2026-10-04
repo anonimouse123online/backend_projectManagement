@@ -127,7 +127,7 @@ exports.getStats = async (req, res) => {
 
       WHERE ${PROJECT_ACCESS_SQL}
 
-        AND i.status != 'Resolved'
+        AND i.status IN ('open', 'in_progress')
     `;
 
 
