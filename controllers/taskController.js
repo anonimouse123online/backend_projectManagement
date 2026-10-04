@@ -116,6 +116,7 @@ const getAccessibleTask = async (
       p.code AS project_code,
       p.name AS project_name,
       p.location AS project_location,
+      p.status AS project_status,
       p.owner_id
 
     FROM tasks t
@@ -440,6 +441,9 @@ exports.getTasks = async function (req, res) {
         p.location
           AS project_location,
 
+        p.status
+          AS project_status,
+
         p.owner_id,
 
         CASE
@@ -665,6 +669,9 @@ exports.getTaskById = async function (req, res) {
 
           p.location
             AS project_location,
+
+          p.status
+            AS project_status,
 
           COALESCE(
             t.progress_pct,
@@ -1180,6 +1187,24 @@ exports.updateTaskSubtasks = async function(req, res) {
   const { subtasks } = req.body;
   console.log('[ROUTE] PATCH /tasks/' + id + '/subtasks');
   try {
+    // Check if the project is in Planning or inactive
+    const taskProj = await pool.query(
+      `SELECT p.status AS project_status
+       FROM tasks t
+       JOIN projects p ON p.id = t.project_id
+       WHERE t.id = $1::uuid`,
+      [id]
+    );
+    if (taskProj.rows.length > 0) {
+      const pStatus = (taskProj.rows[0].project_status || '').trim().toLowerCase();
+      if (pStatus === 'planning' || pStatus === 'draft' || pStatus === 'pending') {
+        return res.status(400).json({
+          success: false,
+          error: 'Subtasks cannot be modified because the project is in planning and not yet activated.'
+        });
+      }
+    }
+
     const subs = Array.isArray(subtasks) ? subtasks : [];
     let pct = 0;
     if (subs.length > 0) {
@@ -2463,6 +2488,7 @@ exports.uploadTaskReport = async function(req, res) {
         p.code AS project_code,
         p.name AS project_name,
         p.location AS project_location,
+        p.status AS project_status,
 
         u.full_name AS engineer_name,
         u.email AS engineer_email

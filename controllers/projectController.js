@@ -65,6 +65,7 @@ const getAccessibleProject = async (
       p.id,
       p.code,
       p.name,
+      p.status,
       p.owner_id
 
     FROM projects p
@@ -3368,10 +3369,628 @@ const logProjectProgress = async (req, res) => {
 // GET PROJECT ISSUES
 // ============================================================
 
-const issueController = require('./issuesController');
-const getProjectIssues = issueController.getProjectIssues;
-const createProjectIssue = issueController.createIssue;
-const updateProjectIssue = issueController.updateIssue;
+const getProjectIssues = async (req, res) => {
+
+  if (authRequired(req, res)) {
+    return;
+  }
+
+
+  const { code } =
+    req.params;
+
+
+  const {
+    status,
+    category,
+    priority,
+    search
+  } = req.query;
+
+
+  try {
+
+    const accessProject =
+      await getAccessibleProject(
+        code,
+        req.user.id,
+        req.user.email
+      );
+
+
+    if (!accessProject) {
+
+      return res.status(403).json({
+        success: false,
+        message:
+          'You do not have access to this project.'
+      });
+    }
+
+
+    let query = `
+      SELECT
+
+        i.id,
+
+        i.project_code,
+
+        i.title,
+
+        i.category,
+
+        i.priority,
+
+        i.location,
+
+        i.description,
+
+        i.status,
+
+        i.resolution_notes,
+
+        i.resolved_at,
+
+        i.created_at,
+
+        i.updated_at,
+
+        ru.full_name
+          AS reporter_name,
+
+        ru.role
+          AS reporter_role,
+
+        au.full_name
+          AS assignee_name,
+
+        au.role
+          AS assignee_role,
+
+        i.reported_by,
+
+        i.assigned_to
+
+      FROM project_issues i
+
+      LEFT JOIN users ru
+        ON ru.id = i.reported_by
+
+      LEFT JOIN users au
+        ON au.id = i.assigned_to
+
+      WHERE i.project_code = $1
+    `;
+
+
+    const params =
+      [
+        code
+      ];
+
+
+    if (
+      status &&
+      status !== 'All'
+    ) {
+
+      params.push(
+        status
+      );
+
+
+      query +=
+        ` AND i.status = $${params.length}`;
+    }
+
+
+    if (
+      category &&
+      category !== 'All'
+    ) {
+
+      params.push(
+        category
+      );
+
+
+      query +=
+        ` AND i.category = $${params.length}`;
+    }
+
+
+    if (
+      priority &&
+      priority !== 'All'
+    ) {
+
+      params.push(
+        priority
+      );
+
+
+      query +=
+        ` AND i.priority = $${params.length}`;
+    }
+
+
+    if (search) {
+
+      params.push(
+        `%${search
+          .trim()
+          .toLowerCase()}%`
+      );
+
+
+      query += `
+        AND (
+          LOWER(i.title)
+            LIKE $${params.length}
+
+          OR LOWER(i.description)
+            LIKE $${params.length}
+
+          OR LOWER(i.location)
+            LIKE $${params.length}
+        )
+      `;
+    }
+
+
+    query += `
+      ORDER BY
+
+        CASE
+
+          WHEN i.status = 'Open'
+            THEN 1
+
+          WHEN i.status = 'In Progress'
+            THEN 2
+
+          ELSE 3
+
+        END,
+
+        i.created_at DESC
+    `;
+
+
+    const { rows } =
+      await pool.query(
+        query,
+        params
+      );
+
+
+    return res.status(200).json({
+      success: true,
+      data:
+        rows
+    });
+
+
+  } catch (err) {
+
+    console.error(
+      'getProjectIssues error:',
+      err
+    );
+
+
+    return res.status(500).json({
+      success: false,
+      message:
+        'Failed to fetch project issues',
+      error:
+        err.message
+    });
+  }
+};
+
+
+// ============================================================
+// CREATE PROJECT ISSUE
+// ============================================================
+
+const createProjectIssue = async (req, res) => {
+
+  if (authRequired(req, res)) {
+    return;
+  }
+
+
+  const { code } =
+    req.params;
+
+
+  const {
+
+    title,
+
+    category,
+
+    priority,
+
+    location,
+
+    description,
+
+    assigned_to
+
+  } = req.body;
+
+
+  const userId =
+    req.user.id;
+
+
+  if (
+    !title ||
+    !category ||
+    !description
+  ) {
+
+    return res.status(400).json({
+      success: false,
+      message:
+        'title, category, and description are required.'
+    });
+  }
+
+
+  try {
+
+    const accessProject =
+      await getAccessibleProject(
+        code,
+        req.user.id,
+        req.user.email
+      );
+
+
+    if (!accessProject) {
+
+      return res.status(403).json({
+        success: false,
+        message:
+          'You do not have access to this project.'
+      });
+    }
+
+    if (accessProject.status && ['planning', 'draft', 'pending'].includes(accessProject.status.trim().toLowerCase())) {
+      return res.status(400).json({
+        success: false,
+        message:
+          'Cannot report issues because the project is in planning and not yet activated.'
+      });
+    }
+
+
+    const { rows } =
+      await pool.query(
+        `
+        INSERT INTO project_issues
+        (
+          project_code,
+
+          title,
+
+          category,
+
+          priority,
+
+          location,
+
+          description,
+
+          status,
+
+          reported_by,
+
+          assigned_to
+        )
+
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          $5,
+          $6,
+          'Open',
+          $7,
+          $8
+        )
+
+        RETURNING *
+        `,
+        [
+          code,
+
+          title.trim(),
+
+          category,
+
+          priority ||
+          'Medium',
+
+          location ||
+          null,
+
+          description.trim(),
+
+          userId,
+
+          assigned_to ||
+          null
+        ]
+      );
+
+
+    return res.status(201).json({
+
+      success: true,
+
+      message:
+        'Issue reported successfully.',
+
+      data:
+        rows[0]
+
+    });
+
+
+  } catch (err) {
+
+    console.error(
+      'createProjectIssue error:',
+      err
+    );
+
+
+    return res.status(500).json({
+      success: false,
+      message:
+        'Failed to report issue',
+      error:
+        err.message
+    });
+  }
+};
+
+
+// ============================================================
+// UPDATE PROJECT ISSUE
+// ============================================================
+
+const updateProjectIssue = async (req, res) => {
+
+  if (authRequired(req, res)) {
+    return;
+  }
+
+
+  const {
+    code,
+    issueId
+  } = req.params;
+
+
+  const {
+
+    status,
+
+    resolution_notes,
+
+    assigned_to,
+
+    priority
+
+  } = req.body;
+
+
+  try {
+
+    const accessProject =
+      await getAccessibleProject(
+        code,
+        req.user.id,
+        req.user.email
+      );
+
+
+    if (!accessProject) {
+
+      return res.status(403).json({
+        success: false,
+        message:
+          'You do not have access to this project.'
+      });
+    }
+
+
+    const existing =
+      await pool.query(
+        `
+        SELECT
+          id,
+          status
+
+        FROM project_issues
+
+        WHERE id = $1
+          AND project_code = $2
+        `,
+        [
+          issueId,
+          code
+        ]
+      );
+
+
+    if (
+      existing.rows.length === 0
+    ) {
+
+      return res.status(404).json({
+        success: false,
+        message:
+          'Issue not found.'
+      });
+    }
+
+
+    const updates =
+      [];
+
+
+    const params =
+      [
+        issueId,
+        code
+      ];
+
+
+    if (status) {
+
+      params.push(
+        status
+      );
+
+
+      updates.push(
+        `status = $${params.length}`
+      );
+
+
+      if (
+        status === 'Resolved'
+      ) {
+
+        updates.push(
+          `resolved_at = NOW()`
+        );
+
+
+      } else {
+
+        updates.push(
+          `resolved_at = NULL`
+        );
+      }
+    }
+
+
+    if (
+      resolution_notes !== undefined
+    ) {
+
+      params.push(
+        resolution_notes
+      );
+
+
+      updates.push(
+        `resolution_notes = $${params.length}`
+      );
+    }
+
+
+    if (
+      assigned_to !== undefined
+    ) {
+
+      params.push(
+        assigned_to
+      );
+
+
+      updates.push(
+        `assigned_to = $${params.length}`
+      );
+    }
+
+
+    if (priority) {
+
+      params.push(
+        priority
+      );
+
+
+      updates.push(
+        `priority = $${params.length}`
+      );
+    }
+
+
+    if (
+      updates.length === 0
+    ) {
+
+      return res.status(400).json({
+        success: false,
+        message:
+          'No update fields provided.'
+      });
+    }
+
+
+    updates.push(
+      'updated_at = NOW()'
+    );
+
+
+    const { rows } =
+      await pool.query(
+        `
+        UPDATE project_issues
+
+        SET
+          ${updates.join(', ')}
+
+        WHERE id = $1
+          AND project_code = $2
+
+        RETURNING *
+        `,
+        params
+      );
+
+
+    return res.status(200).json({
+
+      success: true,
+
+      message:
+        'Issue updated successfully.',
+
+      data:
+        rows[0]
+
+    });
+
+
+  } catch (err) {
+
+    console.error(
+      'updateProjectIssue error:',
+      err
+    );
+
+
+    return res.status(500).json({
+      success: false,
+      message:
+        'Failed to update issue',
+      error:
+        err.message
+    });
+  }
+};
+
 
 // ============================================================
 // GET PROJECT REPORTS
