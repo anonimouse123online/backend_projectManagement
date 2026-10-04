@@ -26,7 +26,7 @@ async function getProject(reference, user, db = pool) {
     throw new IssueError(400, 'A valid project ID or code is required.');
   }
   const { rows } = await db.query(`
-    SELECT p.id, p.code, p.name, p.owner_id,
+    SELECT p.id, p.code, p.name, p.status, p.owner_id,
       EXISTS (
         SELECT 1 FROM project_members pm WHERE pm.project_id = p.code
         AND (pm.user_id = $2::uuid OR ($3::text IS NOT NULL

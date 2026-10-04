@@ -38,6 +38,7 @@ test('PostgreSQL issue migration, aggregate counts, authorized HTTP routes, noti
       engineer: { id: randomUUID(), email: 'engineer@example.test', role: 'Site Engineer' },
       outsider: { id: randomUUID(), email: 'outsider@example.test', role: 'Site Engineer' },
       manager: { id: randomUUID(), email: 'manager@example.test', role: 'Project Manager' },
+      supervisor: { id: randomUUID(), email: 'supervisor@example.test', role: 'Supervisor' },
       admin: { id: randomUUID(), email: 'admin@example.test', role: 'Admin' },
       viewer: { id: randomUUID(), email: 'viewer@example.test', role: 'Member' },
     };
@@ -51,7 +52,7 @@ test('PostgreSQL issue migration, aggregate counts, authorized HTTP routes, noti
       await client.query("INSERT INTO projects (id,code,name,owner_id,status) VALUES ($1,$2,'Test Project',$3,'Completed')",
         [project.id, project.code, project === second ? users.outsider.id : users.owner.id]);
     }
-    for (const user of [users.engineer, users.manager, users.viewer]) {
+    for (const user of [users.engineer, users.manager, users.supervisor, users.viewer]) {
       await client.query('INSERT INTO project_members VALUES ($1,$2,$3,$4)', [first.code, user.id, user.email, user.role]);
     }
     // Duplicate membership must never multiply counts.
@@ -129,8 +130,18 @@ test('PostgreSQL issue migration, aggregate counts, authorized HTTP routes, noti
     }
     const base = `/projects/${first.id}/issues`;
     assert.equal((await request(base, null)).status, 401);
-    for (const user of [users.engineer, users.owner, users.manager, users.admin, users.viewer]) {
-      assert.equal((await request(base, user)).status, 200);
+    const invalidToken = await fetch(root + base, { headers: {
+      Authorization: `Bearer ${jwt.sign(users.engineer, randomUUID())}`,
+    } });
+    assert.equal(invalidToken.status, 403);
+    assert.equal((await invalidToken.json()).error, 'Invalid token.');
+    // Owners/admins need no membership; assigned roles and viewers read through membership.
+    for (const url of [base, `/projects/${first.code}/issues`, `/issues/${migrated[0].id}`]) {
+      for (const user of [users.engineer, users.owner, users.manager, users.supervisor, users.admin, users.viewer]) {
+        const response = await request(url, user);
+        assert.equal(response.status, 200,
+          `${user.role} reading ${url}: ${JSON.stringify(response.body)}`);
+      }
     }
     for (const url of [base, `/projects/${first.code}/issues`, `/issues/${migrated[0].id}`]) {
       assert.equal((await request(url, users.outsider)).status, 403);
@@ -166,6 +177,23 @@ test('PostgreSQL issue migration, aggregate counts, authorized HTTP routes, noti
     assert.equal((await request(base)).body.issues.length, 3);
 
     const body = { title: 'Hollow blocks not delivered', description: 'Expected delivery did not arrive', category: 'delivery', severity: 'critical', reported_by: users.admin.id };
+    // The shared issue controller must preserve the project activation restriction.
+    for (const status of ['Planning', ' Draft ', 'Pending']) {
+      await client.query('UPDATE projects SET status=$1 WHERE id=$2', [status, first.id]);
+      for (const reference of [first.id, first.code]) {
+        const url = `/projects/${reference}/issues`;
+        assert.equal((await request(url)).status, 200);
+        const blocked = await request(url, users.engineer, 'POST', body);
+        assert.equal(blocked.status, 400);
+        assert.equal(blocked.body.message,
+          'Cannot report issues because the project is in planning and not yet activated.');
+        assert.equal((await request(url, users.outsider, 'POST', body)).status, 403);
+        assert.equal((await request(url, users.viewer, 'POST', body)).status, 403);
+      }
+    }
+    await client.query("UPDATE projects SET status='Completed' WHERE id=$1", [first.id]);
+    assert.equal((await client.query('SELECT COUNT(*)::int AS count FROM notifications')).rows[0].count, 0);
+    assert.equal((await service.getCounts(first.id, client)).active_issue_count, 2);
     assert.equal((await request(base, users.outsider, 'POST', body)).status, 403);
     assert.equal((await request(base, users.viewer, 'POST', body)).status, 403);
     assert.equal((await request(base, users.engineer, 'POST', { ...body, assigned_to: users.outsider.id })).status, 400);
@@ -195,6 +223,9 @@ test('PostgreSQL issue migration, aggregate counts, authorized HTTP routes, noti
     assert.equal(listing.body.data[0].active_issue_count, 3);
 
     const issueUrl = `${base}/${created.id}`;
+    assert.equal((await request(issueUrl, users.supervisor, 'PATCH', {
+      resolution_notes: 'Reviewed by the assigned supervisor',
+    })).status, 200);
     assert.equal((await request(issueUrl, users.outsider, 'PATCH', { status: 'resolved' })).status, 403);
     assert.equal((await request(`/projects/${second.id}/issues/${created.id}`, users.outsider, 'PATCH', { status: 'resolved' })).status, 404);
     assert.equal((await request(issueUrl, users.engineer, 'PATCH', { status: 'closed' })).status, 400);

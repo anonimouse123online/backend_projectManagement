@@ -129,6 +129,10 @@ exports.createIssue = async (req, res) => {
     await client.query('BEGIN'); transaction = true;
     const project = await service.getProject(referenceOf(req), req.user, client);
     service.requireWrite(project, req.user);
+    if (['planning', 'draft', 'pending'].includes(service.normalize(project.status))) {
+      throw new service.IssueError(400,
+        'Cannot report issues because the project is in planning and not yet activated.');
+    }
     // Serialize mutations per project so concurrent submissions see committed counts.
     await client.query('SELECT id FROM projects WHERE id = $1 FOR UPDATE', [project.id]);
     if (own(body, 'project_id') && body.project_id !== project.id) throw new service.IssueError(400, 'project_id does not match the URL project.');

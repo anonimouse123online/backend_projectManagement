@@ -22,12 +22,17 @@ const {
   // Project Actions
   getProjectProgress,
   logProjectProgress,
-  getProjectIssues,
-  createProjectIssue,
-  updateProjectIssue,
   getProjectReports,
   createProjectReport,
 } = require('../controllers/projectController');
+
+// Both project-code and UUID issue URLs share the same authorization checks.
+const {
+  getProjectIssues,
+  createIssue: createProjectIssue,
+  updateIssue: updateProjectIssue,
+  deleteIssue,
+} = require('../controllers/issuesController');
 
 const multer = require('multer');
 const path = require('path');
@@ -81,7 +86,7 @@ router.get('/:code/issues',                  getProjectIssues);
 router.post('/:code/issues',                 createProjectIssue);
 router.patch('/:code/issues/:issueId',       updateProjectIssue);
 router.put('/:code/issues/:issueId',         updateProjectIssue);
-router.delete('/:code/issues/:issueId',      require('../controllers/issuesController').deleteIssue);
+router.delete('/:code/issues/:issueId',      deleteIssue);
 
 router.get('/:code/reports',                 getProjectReports);
 router.post('/:code/reports',                createProjectReport);
