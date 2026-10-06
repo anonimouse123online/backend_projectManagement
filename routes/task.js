@@ -30,6 +30,10 @@ router.post(
   taskController.createTask
 );
 
+// No generic edit route existed; use the existing task resource URL.
+router.patch('/:id', taskController.updateTask);
+router.put('/:id', taskController.updateTask);
+
 
 // ============================================================
 // TASK ACTIONS

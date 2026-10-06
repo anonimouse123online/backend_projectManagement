@@ -44,6 +44,43 @@ test('only project owners, admins and assigned engineers/managers/supervisors ca
   assert.throws(() => service.requireWrite({ ...project, is_member: false }, { id: 'outsider', role: 'Site Engineer' }), { status: 403 });
 });
 
+test('resolving requires summary, meaningful steps and final remarks on every update route', async () => {
+  const connect = mock.method(pool, 'connect', async () => { throw new Error('Unexpected database access'); });
+  const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
+  const valid = { resolution_summary: 'Hazard removed', resolution_steps: ['Inspected', 'Removed hazard'], final_remarks: 'Safe now' };
+  try {
+    for (const body of [
+      {}, { ...valid, resolution_summary: '' }, { ...valid, resolution_summary: '  ' },
+      { ...valid, resolution_summary: 42 }, { ...valid, resolution_steps: undefined },
+      { ...valid, resolution_steps: 'Inspected' }, { ...valid, resolution_steps: [] },
+      { ...valid, resolution_steps: ['  '] }, { ...valid, resolution_steps: [null] },
+      { ...valid, resolution_steps: ['Inspected', 12] }, { ...valid, final_remarks: undefined },
+      { ...valid, final_remarks: '  ' },
+    ]) {
+      for (const fn of [controller.updateIssue, controller.resolveIssue]) {
+        await fn({ user: { id: 'user' }, params: {}, body: { ...body, status: 'Resolved' } }, res);
+        assert.equal(res.code, 400);
+      }
+    }
+    await controller.resolveIssue({ user: { id: 'user' }, params: {}, body: { ...valid, status: 'open' } }, res);
+    assert.equal(res.code, 400);
+    assert.equal(connect.mock.calls.length, 0);
+  } finally { mock.restoreAll(); }
+});
+
+test('only admins and project managers with project access can resolve issues', () => {
+  const project = { owner_id: 'owner', is_member: true };
+  for (const role of ['Admin', 'Project Manager', 'project_manager']) {
+    assert.doesNotThrow(() => service.requireResolve(project, { id: 'member', role }));
+  }
+  for (const role of ['Site Engineer', 'Supervisor', 'Member']) {
+    assert.throws(() => service.requireResolve(project, { id: 'member', role }), { status: 403 });
+    assert.throws(() => service.requireResolve(project, { id: 'owner', role }), { status: 403 });
+  }
+  assert.throws(() => service.requireResolve({ ...project, is_member: false }, { id: 'outsider', role: 'Project Manager' }), { status: 403 });
+  assert.doesNotThrow(() => service.requireResolve({ ...project, is_member: false }, { id: 'owner', role: 'Project Manager' }));
+});
+
 test('the issue socket namespace requires a valid JWT and joins only the authenticated user room', () => {
   const previousSecret = process.env.JWT_SECRET;
   process.env.JWT_SECRET = 'project-issue-socket-test-secret';

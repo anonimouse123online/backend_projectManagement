@@ -31,6 +31,8 @@ const {
   getProjectIssues,
   createIssue: createProjectIssue,
   updateIssue: updateProjectIssue,
+  resolveIssue,
+  getIssueById,
   deleteIssue,
 } = require('../controllers/issuesController');
 
@@ -84,6 +86,8 @@ router.post('/:code/progress',               logProjectProgress);
 
 router.get('/:code/issues',                  getProjectIssues);
 router.post('/:code/issues',                 createProjectIssue);
+router.get('/:code/issues/:issueId',         getIssueById);
+router.patch('/:code/issues/:issueId/resolve', resolveIssue);
 router.patch('/:code/issues/:issueId',       updateProjectIssue);
 router.put('/:code/issues/:issueId',         updateProjectIssue);
 router.delete('/:code/issues/:issueId',      deleteIssue);

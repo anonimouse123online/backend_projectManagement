@@ -1,4 +1,5 @@
 const pool = require('../db');
+const taskPhases = require('../services/taskPhaseService');
 const { generateAIReport } = require('../services/aiService');
 const { processPendingReports } = require('../services/schedulerService');
 
@@ -18,6 +19,7 @@ exports.getReports = async (req, res) => {
          r.created_at,
          t.task_name,
          t.phase,
+         ${taskPhases.selectPhases()},
          p.name       AS project_name,
          u.full_name  AS assignee
        FROM reports r
@@ -53,6 +55,7 @@ exports.getReportById = async (req, res) => {
          r.created_at,
          t.task_name,
          t.phase,
+         ${taskPhases.selectPhases()},
          p.name       AS project_name,
          u.full_name  AS assignee
        FROM reports r

@@ -1,4 +1,6 @@
 const pool = require('../db');
+const taskPhases = require('../services/taskPhaseService');
+const { createTaskDiagnostics } = require('../services/taskCreationDiagnostics');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -36,14 +38,15 @@ const requireAuth = (req, res) => {
 
 const getAccessibleProject = async (
   projectIdentifier,
-  userId
+  userId,
+  db = pool
 ) => {
 
   if (!userId || !projectIdentifier) {
     return null;
   }
 
-  const { rows } = await pool.query(
+  const { rows } = await db.query(
     `
     SELECT
       p.id,
@@ -98,14 +101,15 @@ const getAccessibleProject = async (
 
 const getAccessibleTask = async (
   taskId,
-  userId
+  userId,
+  db = pool
 ) => {
 
   if (!taskId || !userId) {
     return null;
   }
 
-  const { rows } = await pool.query(
+  const { rows } = await db.query(
     `
     SELECT
       t.id,
@@ -319,12 +323,12 @@ exports.getTasks = async function (req, res) {
     ) {
 
       params.push(
-        `%${phase}%`
+        taskPhases.filterValue(phase)
       );
 
 
       conditions.push(
-        `t.phase ILIKE $${params.length}`
+        taskPhases.filterPhases(params.length)
       );
     }
 
@@ -429,6 +433,7 @@ exports.getTasks = async function (req, res) {
         ) AS task_name,
 
         t.phase,
+        ${taskPhases.selectPhases()},
 
         t.project_id,
 
@@ -639,6 +644,7 @@ exports.getTaskById = async function (req, res) {
           ) AS task_name,
 
           t.phase,
+          ${taskPhases.selectPhases()},
 
           t.project_id,
 
@@ -813,11 +819,11 @@ exports.getTaskById = async function (req, res) {
 // ============================================================
 // SYNC PROJECT PROGRESS FROM TASKS & SUBTASKS
 // ============================================================
-const syncProjectProgress = async (projectId) => {
+const syncProjectProgress = async (projectId, db = pool) => {
   if (!projectId) return 0;
 
   try {
-    const tasksRes = await pool.query(
+    const tasksRes = await db.query(
       `SELECT id, status, progress_pct, subtasks
        FROM tasks
        WHERE project_id = $1::uuid`,
@@ -852,7 +858,7 @@ const syncProjectProgress = async (projectId) => {
 
     const targetStatus = overallPct === 100 ? 'Completed' : overallPct > 0 ? 'Ongoing' : 'Pending';
 
-    await pool.query(
+    await db.query(
       `UPDATE projects
        SET progress = $1,
            progress_pct = $1,
@@ -865,6 +871,7 @@ const syncProjectProgress = async (projectId) => {
     return overallPct;
   } catch (err) {
     console.error('syncProjectProgress error:', err.message);
+    if (db !== pool) throw err;
     return 0;
   }
 };
@@ -1007,7 +1014,7 @@ exports.updateTaskStatus = async function (
         WHERE id =
           $3::uuid
 
-        RETURNING *
+        RETURNING *, ${taskPhases.selectPhases('tasks')}
         `,
         [
           status,
@@ -1134,7 +1141,8 @@ exports.completeTask = async function (
           assignee_id,
           status,
           progress_pct,
-          updated_at
+          updated_at,
+          ${taskPhases.selectPhases('tasks')}
         `,
         [
           JSON.stringify(currentSubs),
@@ -1222,7 +1230,7 @@ exports.updateTaskSubtasks = async function(req, res) {
            status = $3,
            updated_at = NOW()
        WHERE id = $4::uuid
-       RETURNING *`,
+       RETURNING *, ${taskPhases.selectPhases('tasks')}`,
       [JSON.stringify(subs), pct, autoStatus, id]
     );
 
@@ -1281,6 +1289,10 @@ exports.createTask = async function (req, res) {
   // Keep these outside try{} so catch{} can access them
   let receivedPhase = '';
   let phase = '';
+  let client;
+  let transaction = false;
+  let db;
+  const diagnostics = createTaskDiagnostics();
 
   try {
 
@@ -1299,31 +1311,9 @@ exports.createTask = async function (req, res) {
     // PHASE
     // ============================================================
 
-    receivedPhase = (
-      req.body.phase ||
-      ''
-    ).trim();
-
-
-    // Convert frontend short names to the EXACT values
-    // required by tasks_phase_check in PostgreSQL
-    const phaseMap = {
-      'Foundation': 'Phase 1 - Foundation',
-      'Structural': 'Phase 2 - Structural',
-      'Electrical & Utilities': 'Phase 3 - Electrical & Utilities',
-      'Plumbing & MEP': 'Phase 4 - Plumbing & MEP',
-      'Finishing': 'Phase 5 - Finishing',
-
-      // Also allow frontend to already send DB values
-      'Phase 1 - Foundation': 'Phase 1 - Foundation',
-      'Phase 2 - Structural': 'Phase 2 - Structural',
-      'Phase 3 - Electrical & Utilities': 'Phase 3 - Electrical & Utilities',
-      'Phase 4 - Plumbing & MEP': 'Phase 4 - Plumbing & MEP',
-      'Phase 5 - Finishing': 'Phase 5 - Finishing'
-    };
-
-
-    phase = phaseMap[receivedPhase] || '';
+    const phases = taskPhases.phasesOf(req.body, true);
+    receivedPhase = req.body.phases || req.body.phase;
+    phase = phases[0]; // Deprecated scalar compatibility value only.
 
 
     console.log('======================================');
@@ -1396,23 +1386,6 @@ exports.createTask = async function (req, res) {
     }
 
 
-    if (!receivedPhase) {
-      return res.status(400).json({
-        success: false,
-        error: 'Phase is required.'
-      });
-    }
-
-
-    // Reject phases that are not part of the DB constraint
-    if (!phase) {
-      return res.status(400).json({
-        success: false,
-        error: `Invalid construction phase: ${receivedPhase}`
-      });
-    }
-
-
     if (!projectIdentifier) {
       return res.status(400).json({
         success: false,
@@ -1466,10 +1439,17 @@ exports.createTask = async function (req, res) {
     // RESOLVE + AUTHORIZE PROJECT
     // ============================================================
 
+    console.log('[CREATE TASK] acquiring database connection', { request_id: diagnostics.requestId });
+    client = await pool.connect();
+    db = diagnostics.wrap(client);
+    const connection = await db.query("SELECT current_database(), current_schema(), current_setting('search_path') AS search_path");
+    console.log('[CREATE TASK] database connection', { request_id: diagnostics.requestId, ...connection.rows[0] });
+
     const project =
       await getAccessibleProject(
         projectIdentifier,
-        req.user.id
+        req.user.id,
+        db
       );
 
 
@@ -1545,7 +1525,7 @@ exports.createTask = async function (req, res) {
 
     if (isAssigneeUuid) {
 
-      userResult = await pool.query(
+      userResult = await db.query(
         `
           SELECT
             id,
@@ -1562,7 +1542,7 @@ exports.createTask = async function (req, res) {
 
     } else {
 
-      userResult = await pool.query(
+      userResult = await db.query(
         `
           SELECT
             id,
@@ -1601,7 +1581,7 @@ exports.createTask = async function (req, res) {
     // ============================================================
 
     const membership =
-      await pool.query(
+      await db.query(
         `
           SELECT id
           FROM project_members
@@ -1680,8 +1660,11 @@ exports.createTask = async function (req, res) {
     console.log('======================================');
 
 
+    await db.query('BEGIN');
+    transaction = true;
+
     const result =
-      await pool.query(
+      await db.query(
         `
         INSERT INTO tasks
         (
@@ -1731,6 +1714,16 @@ exports.createTask = async function (req, res) {
         ]
       );
 
+    await taskPhases.replacePhases(result.rows[0].id, phases, db);
+
+    // Inspect the relation resolved by this connection's search_path, preserving older
+    // databases whose resource status is an ordinary column rather than a generated one.
+    const resourceColumn = await db.query(`SELECT n.nspname AS schema, c.relname AS table,
+      a.attgenerated <> '' AS is_generated FROM pg_attribute a
+      JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE a.attrelid = 'resources'::regclass AND a.attname = 'status' AND NOT a.attisdropped`);
+    const generatedResourceStatus = resourceColumn.rows[0]?.is_generated === true;
+    console.log('[CREATE TASK] resource status column', { request_id: diagnostics.requestId, ...resourceColumn.rows[0] });
 
     // ============================================================
     // SYNC MATERIALS & RESOURCES TO INVENTORY (resources table)
@@ -1752,7 +1745,7 @@ exports.createTask = async function (req, res) {
           const unitPrice = parseFloat(item.unitPrice || item.unit_price) || 0;
 
           // Check if resource already exists for this project
-          const existingRes = await pool.query(
+          const existingRes = await db.query(
             `SELECT id, quantity, min_threshold FROM resources
              WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
                AND LOWER(TRIM(project)) = LOWER(TRIM($2))
@@ -1767,24 +1760,23 @@ exports.createTask = async function (req, res) {
               ? 'Low stock'
               : (category === 'Equipment' ? 'Available' : 'In stock');
 
-            await pool.query(
+            await db.query(
               `UPDATE resources
-               SET quantity = $1,
-                   status = $2,
+               SET quantity = $1${generatedResourceStatus ? '' : ', status = $2'},
                    updated_at = NOW()
-               WHERE id = $3`,
-              [newQty, status, current.id]
+               WHERE id = $${generatedResourceStatus ? 2 : 3}`,
+              generatedResourceStatus ? [newQty, current.id] : [newQty, status, current.id]
             );
           } else {
             const status = quantity <= minThreshold
               ? (quantity === 0 ? 'Out of stock' : 'Low stock')
               : (category === 'Equipment' ? 'Available' : 'In stock');
 
-            await pool.query(
+            await db.query(
               `INSERT INTO resources
-               (name, supplier, category, quantity, unit, min_threshold, unit_price, project, status, created_at, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())`,
-              [itemName, supplier, category, quantity, unit, minThreshold, unitPrice, projectName, status]
+               (name, supplier, category, quantity, unit, min_threshold, unit_price, project${generatedResourceStatus ? '' : ', status'}, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8${generatedResourceStatus ? '' : ', $9'}, NOW(), NOW())`,
+              [itemName, supplier, category, quantity, unit, minThreshold, unitPrice, projectName, ...(generatedResourceStatus ? [] : [status])]
             );
           }
         }
@@ -1803,7 +1795,7 @@ exports.createTask = async function (req, res) {
 
           if (!name) continue;
 
-          const existingRes = await pool.query(
+          const existingRes = await db.query(
             `SELECT id, quantity, min_threshold FROM resources
              WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
                AND LOWER(TRIM(project)) = LOWER(TRIM($2))
@@ -1815,28 +1807,32 @@ exports.createTask = async function (req, res) {
             const current = existingRes.rows[0];
             const newQty = (current.quantity || 0) + qty;
             const status = newQty <= (current.min_threshold || 10) ? 'Low stock' : 'In stock';
-            await pool.query(
+            await db.query(
               `UPDATE resources
-               SET quantity = $1, status = $2, updated_at = NOW()
-               WHERE id = $3`,
-              [newQty, status, current.id]
+               SET quantity = $1${generatedResourceStatus ? '' : ', status = $2'}, updated_at = NOW()
+               WHERE id = $${generatedResourceStatus ? 2 : 3}`,
+              generatedResourceStatus ? [newQty, current.id] : [newQty, status, current.id]
             );
           } else {
             const status = qty <= 10 ? 'Low stock' : 'In stock';
-            await pool.query(
+            await db.query(
               `INSERT INTO resources
-               (name, supplier, category, quantity, unit, min_threshold, unit_price, project, status, created_at, updated_at)
-               VALUES ($1, 'General Supplier', 'Material', $2, $3, 10, 0, $4, $5, NOW(), NOW())`,
-              [name, qty, unit, projectName, status]
+               (name, supplier, category, quantity, unit, min_threshold, unit_price, project${generatedResourceStatus ? '' : ', status'}, created_at, updated_at)
+               VALUES ($1, 'General Supplier', 'Material', $2, $3, 10, 0, $4${generatedResourceStatus ? '' : ', $5'}, NOW(), NOW())`,
+              [name, qty, unit, projectName, ...(generatedResourceStatus ? [] : [status])]
             );
           }
         }
       }
     } catch (resourceErr) {
       console.error('Failed to sync resources to inventory:', resourceErr.message);
+      throw resourceErr;
     }
 
-    await syncProjectProgress(resolvedProjectId);
+    await syncProjectProgress(resolvedProjectId, db);
+    const createdTask = await taskPhases.withPhases(result.rows[0], db);
+    await db.query('COMMIT');
+    transaction = false;
 
     return res.status(201).json({
 
@@ -1846,12 +1842,22 @@ exports.createTask = async function (req, res) {
         'Task created successfully.',
 
       data:
-        result.rows[0]
+        createdTask
 
     });
 
 
   } catch (err) {
+
+    if (transaction) {
+      try { await db.query('ROLLBACK'); }
+      catch (rollbackError) { console.error('Task creation rollback failed:', rollbackError.message); }
+    }
+    if (err instanceof taskPhases.PhaseError) {
+      return res.status(400).json({ success: false, message: err.message });
+    }
+
+    diagnostics.logError(err);
 
     console.error('======================================');
     console.error('❌ CREATE TASK ERROR');
@@ -1884,9 +1890,66 @@ exports.createTask = async function (req, res) {
 
     });
 
-  }
+  } finally { client?.release(); }
 
 };
+// Edit task metadata and category selections; status/assignment/subtasks retain their action routes.
+exports.updateTask = async function (req, res) {
+  if (!requireAuth(req, res)) return;
+  let client;
+  let transaction = false;
+  try {
+    const body = req.body || {};
+    const phases = taskPhases.phasesOf(body);
+    const changes = [];
+    const values = [];
+    const add = (column, value) => { values.push(value); changes.push(`${column} = $${values.length}`); };
+    for (const [column, alias, max] of [
+      ['task_name', 'taskName', 255], ['materials_required', 'materialsRequired', Infinity],
+      ['site_instructions', 'siteInstructions', Infinity], ['priority', 'priority', 20],
+    ]) {
+      if (!Object.hasOwn(body, column) && !Object.hasOwn(body, alias)) continue;
+      const value = Object.hasOwn(body, column) ? body[column] : body[alias];
+      if (typeof value !== 'string' || !value.trim() || value.length > max) throw new taskPhases.PhaseError(`Invalid ${column}.`);
+      if (column === 'priority' && !['High', 'Medium', 'Low'].includes(value.trim())) throw new taskPhases.PhaseError('Invalid priority.');
+      add(column, value.trim());
+    }
+    if (phases) add('phase', phases[0]);
+    if (!changes.length) throw new taskPhases.PhaseError('No update fields provided.');
+    client = await pool.connect();
+    await client.query('BEGIN'); transaction = true;
+    const task = await getAccessibleTask(req.params.id, req.user.id, client);
+    if (!task) {
+      await client.query('ROLLBACK'); transaction = false;
+      return res.status(404).json({ success: false, error: 'Task not found or you do not have access.' });
+    }
+    const locked = await client.query('SELECT id FROM tasks WHERE id = $1 FOR UPDATE', [task.id]);
+    if (!locked.rows.length) {
+      await client.query('ROLLBACK'); transaction = false;
+      return res.status(404).json({ success: false, error: 'Task not found or you do not have access.' });
+    }
+    if (Object.hasOwn(body, 'phase') && !Object.hasOwn(body, 'phases')) {
+      const current = await client.query('SELECT COUNT(*)::int AS count FROM task_phases WHERE task_id = $1', [task.id]);
+      if (current.rows[0].count > 1) throw new taskPhases.PhaseError('Use phases to edit a task with multiple construction phase categories.');
+    }
+    values.push(task.id);
+    const result = await client.query(`UPDATE tasks SET ${changes.join(', ')}, updated_at = NOW()
+      WHERE id = $${values.length} RETURNING *`, values);
+    if (phases) await taskPhases.replacePhases(task.id, phases, client);
+    const updated = await taskPhases.withPhases(result.rows[0], client);
+    await client.query('COMMIT'); transaction = false;
+    return res.status(200).json({ success: true, message: 'Task updated successfully.', data: updated });
+  } catch (error) {
+    if (transaction) {
+      try { await client.query('ROLLBACK'); }
+      catch (rollbackError) { console.error('Task update rollback failed:', rollbackError.message); }
+    }
+    if (error instanceof taskPhases.PhaseError) return res.status(400).json({ success: false, message: error.message });
+    console.error('updateTask error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to update task.' });
+  } finally { client?.release(); }
+};
+
 // ─── ASSIGN TASK ──────────────────────────────────────────────────────────────
 exports.assignTask = async function (
   req,
@@ -2027,7 +2090,7 @@ exports.assignTask = async function (
 
         WHERE id = $2::uuid
 
-        RETURNING *
+        RETURNING *, ${taskPhases.selectPhases('tasks')}
         `,
         [
           assigneeId,

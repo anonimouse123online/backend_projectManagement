@@ -1,4 +1,5 @@
 const pool = require('../db');
+const taskPhases = require('../services/taskPhaseService');
 const projectService = require('../services/projectService');
 const { countColumns, countJoin } = require('../services/projectIssueService');
 const crypto = require('crypto');
@@ -1990,6 +1991,8 @@ const getProjectActiveTask = async (req, res) => {
         SELECT
           t.id,
           t.task_name AS title,
+          t.phase,
+          ${taskPhases.selectPhases()},
           t.status,
           u.full_name AS assignee
 
@@ -2809,7 +2812,7 @@ const getProjectProgress = async (req, res) => {
       await pool.query(
         `
         SELECT
-          phase,
+          tp.phase,
 
           COUNT(*)
             AS total_tasks,
@@ -2822,13 +2825,13 @@ const getProjectProgress = async (req, res) => {
             WHERE LOWER(status) = 'in progress'
           ) AS in_progress_tasks
 
-        FROM tasks
+        FROM tasks t JOIN task_phases tp ON tp.task_id = t.id
 
-        WHERE project_id = $1
+        WHERE t.project_id = $1
 
-        GROUP BY phase
+        GROUP BY tp.phase
 
-        ORDER BY phase
+        ORDER BY tp.phase
         `,
         [
           project.id

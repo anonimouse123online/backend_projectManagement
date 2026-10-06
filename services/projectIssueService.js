@@ -56,6 +56,20 @@ async function getCounts(projectId, db = pool) {
   return rows[0];
 }
 
+async function getResolver(id, db = pool) {
+  if (!UUID.test(id || '')) throw new IssueError(401, 'Authentication required.');
+  const { rows } = await db.query(`SELECT id, full_name, email, role FROM users
+    WHERE id = $1 AND is_active = TRUE FOR SHARE`, [id]);
+  if (!rows.length) throw new IssueError(401, 'An active authenticated user is required.');
+  return rows[0];
+}
+
+function requireResolve(project, user) {
+  if (isAdmin(user) || (roleOf(user) === 'project_manager' &&
+    (project.owner_id === user.id || project.is_member))) return;
+  throw new IssueError(403, 'Only admins and project managers with project access can resolve issues.');
+}
+
 // This namespace authenticates independently; existing chat sockets keep their behavior.
 function initializeIssueSocket(io) {
   const jwt = require('jsonwebtoken');
@@ -84,13 +98,14 @@ async function publishChange(req, project, counts, notification) {
     )`, [project.owner_id, project.code]);
   const namespace = io.of('/project-issues');
   const rooms = rows.map(user => `user:${user.id}`);
-  if (!rooms.length) return;
-  const recipients = namespace.to(rooms);
-  recipients.emit('project_issues_updated', { project_id: project.id, project_code: project.code, ...counts });
-  if (notification) recipients.emit('new_notification', { ...notification, project_name: project.name });
+  if (rooms.length) namespace.to(rooms).emit('project_issues_updated', { project_id: project.id, project_code: project.code, ...counts });
+  for (const item of Array.isArray(notification) ? notification : notification ? [notification] : []) {
+    const notificationRooms = item.audience === 'individual' ? [`user:${item.target_user_id}`] : rooms;
+    if (notificationRooms.length) namespace.to(notificationRooms).emit('new_notification', { ...item, project_name: project.name });
+  }
 }
 
 module.exports = {
   STATUSES, SEVERITIES, UUID, normalize, isAdmin, countColumns, countJoin,
-  IssueError, getProject, requireWrite, getCounts, initializeIssueSocket, publishChange,
+  IssueError, getProject, requireWrite, requireResolve, getResolver, getCounts, initializeIssueSocket, publishChange,
 };

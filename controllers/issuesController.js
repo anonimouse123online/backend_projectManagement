@@ -2,9 +2,18 @@ const pool = require('../db');
 const service = require('../services/projectIssueService');
 
 const issueSelect = `SELECT i.*, ru.full_name AS reporter_name, ru.role AS reporter_role,
-  au.full_name AS assignee_name, au.role AS assignee_role
+  au.full_name AS assignee_name, au.role AS assignee_role,
+  CASE WHEN i.status = 'resolved' THEN latest.resolution ELSE NULL END AS resolution
   FROM project_issues i LEFT JOIN users ru ON ru.id = i.reported_by
-  LEFT JOIN users au ON au.id = i.assigned_to`;
+  LEFT JOIN users au ON au.id = i.assigned_to
+  LEFT JOIN LATERAL (
+    SELECT jsonb_build_object('resolution_summary', r.resolution_summary,
+      'resolution_steps', r.resolution_steps, 'final_remarks', r.final_remarks,
+      'resolved_by', jsonb_build_object('id', r.resolved_by, 'name', resolver.full_name),
+      'resolved_at', r.resolved_at) AS resolution
+    FROM issue_resolutions r LEFT JOIN users resolver ON resolver.id = r.resolved_by
+    WHERE r.issue_id = i.id ORDER BY r.resolved_at DESC, r.id DESC LIMIT 1
+  ) latest ON TRUE`;
 const referenceOf = req => req.params.projectId || req.params.code;
 const idOf = req => req.params.issueId || req.params.id;
 const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
@@ -50,15 +59,15 @@ async function validateAssignee(assignedTo, project, db) {
   if (!rows.length) throw new service.IssueError(400, 'Assignee must belong to the project.');
 }
 
-async function locateIssue(req, db) {
+async function locateIssue(req, db, user = req.user) {
   const id = idOf(req);
   if (!service.UUID.test(id || '')) throw new service.IssueError(400, 'Invalid issue ID.');
   let project;
-  if (referenceOf(req)) project = await service.getProject(referenceOf(req), req.user, db);
+  if (referenceOf(req)) project = await service.getProject(referenceOf(req), user, db);
   const { rows } = await db.query(`${issueSelect} WHERE i.id = $1${project ? ' AND i.project_id = $2' : ''}`,
     project ? [id, project.id] : [id]);
   if (!rows.length) throw new service.IssueError(404, 'Issue not found.');
-  project ||= await service.getProject(rows[0].project_id, req.user, db);
+  project ||= await service.getProject(rows[0].project_id, user, db);
   return { issue: rows[0], project };
 }
 
@@ -167,44 +176,91 @@ exports.getIssueById = async (req, res) => {
   } catch (error) { return fail(res, error); }
 };
 
-exports.updateIssue = async (req, res) => {
+function resolutionOf(body) {
+  const summary = text(body.resolution_summary, 'resolution_summary', true);
+  if (!Array.isArray(body.resolution_steps) || !body.resolution_steps.length) {
+    throw new service.IssueError(400, 'resolution_steps must be a non-empty array of steps.');
+  }
+  const steps = body.resolution_steps.map(step => text(step, 'resolution_steps entry', true));
+  const remarks = text(body.final_remarks, 'final_remarks', true);
+  return { summary, steps, remarks };
+}
+
+async function updateIssue(req, res, resolve = false) {
   let client;
   let transaction = false;
   try {
     authenticated(req);
     const body = req.body || {};
+    const status = resolve ? 'resolved' : own(body, 'status') ? enumValue(body.status, service.STATUSES, 'status') : null;
+    if (resolve && own(body, 'status') && enumValue(body.status, service.STATUSES, 'status') !== 'resolved') {
+      throw new service.IssueError(400, 'The resolve endpoint only accepts status resolved.');
+    }
+    const resolving = status === 'resolved';
+    const feedback = resolving ? resolutionOf(body) : null;
     const changes = [];
     const values = [];
     const add = (key, value) => { values.push(value); changes.push(`${key} = $${values.length}`); };
     for (const [key, max, required] of [['title', 255, true], ['description', Infinity, true], ['category', 100, true], ['location', 255, false], ['resolution_notes', Infinity, false]]) {
       if (own(body, key)) add(key, body[key] === null && !required ? null : text(body[key], key, required, max));
     }
-    if (own(body, 'status')) add('status', enumValue(body.status, service.STATUSES, 'status'));
+    if (status) add('status', status);
     if (own(body, 'severity') || own(body, 'priority')) add('severity', severityOf(body));
     if (own(body, 'assigned_to')) add('assigned_to', body.assigned_to);
     if (own(body, 'project_id')) throw new service.IssueError(400, 'An issue cannot be moved to another project.');
     if (!changes.length) throw new service.IssueError(400, 'No update fields provided.');
     client = await pool.connect();
     await client.query('BEGIN'); transaction = true;
-    const { issue, project } = await locateIssue(req, client);
-    service.requireWrite(project, req.user);
+    // Resolution permissions use the current database role, not client fields or a stale JWT role.
+    const actor = resolving ? await service.getResolver(req.user.id, client) : req.user;
+    const { issue, project } = await locateIssue(req, client, actor);
+    if (resolving) service.requireResolve(project, actor);
+    else service.requireWrite(project, actor);
     await client.query('SELECT id FROM projects WHERE id = $1 FOR UPDATE', [project.id]);
+    // Read again under the lock: a concurrent resolver may have committed since locateIssue.
+    const locked = await client.query('SELECT status FROM project_issues WHERE id = $1 AND project_id = $2 FOR UPDATE',
+      [issue.id, project.id]);
+    if (!locked.rows.length) throw new service.IssueError(404, 'Issue not found.');
+    if (resolving && locked.rows[0].status === 'resolved') throw new service.IssueError(409, 'Issue is already resolved.');
     if (own(body, 'assigned_to')) await validateAssignee(body.assigned_to, project, client);
+    if (resolving) {
+      const saved = await client.query(`INSERT INTO issue_resolutions
+        (issue_id, resolution_summary, resolution_steps, final_remarks, resolved_by)
+        VALUES ($1, $2, $3::jsonb, $4, $5) RETURNING resolved_at::text AS resolved_at`,
+      [issue.id, feedback.summary, JSON.stringify(feedback.steps), feedback.remarks, actor.id]);
+      add('resolved_at', saved.rows[0].resolved_at);
+    } else if (status) add('resolved_at', null);
     values.push(issue.id, project.id);
     const { rows } = await client.query(`UPDATE project_issues SET ${changes.join(', ')}, updated_at = NOW()
       WHERE id = $${values.length - 1} AND project_id = $${values.length} RETURNING *`, values);
     if (!rows.length) throw new service.IssueError(404, 'Issue not found.');
+    const notifications = [];
+    if (resolving) {
+      // Reuse the existing individual notification audience for the reporter and assignee.
+      const recipients = [...new Set([rows[0].reported_by, rows[0].assigned_to].filter(Boolean))];
+      for (const recipient of recipients) {
+        const saved = await client.query(`INSERT INTO notifications
+          (title, message, audience, project_id, target_user_id, created_by)
+          VALUES ('Issue Resolved', $1, 'individual', $2, $3, $4) RETURNING *`,
+        [`${rows[0].title} has been resolved by ${actor.full_name || 'a project manager'}.`, project.code, recipient, actor.id]);
+        notifications.push(saved.rows[0]);
+      }
+    }
+    const detail = await client.query(`${issueSelect} WHERE i.id = $1`, [issue.id]);
     const counts = await service.getCounts(project.id, client);
     await client.query('COMMIT'); transaction = false;
     client.release(); client = null;
-    await publish(req, project, counts);
-    return res.status(200).json({ success: true, message: 'Issue updated successfully.',
-      project_id: project.id, ...counts, data: rows[0] });
+    await publish(req, project, counts, notifications);
+    return res.status(200).json({ success: true, message: resolving ? 'Issue resolved successfully.' : 'Issue updated successfully.',
+      project_id: project.id, ...counts, data: detail.rows[0] });
   } catch (error) {
     if (transaction) await rollback(client);
     return fail(res, error);
   } finally { client?.release(); }
-};
+}
+
+exports.updateIssue = (req, res) => updateIssue(req, res);
+exports.resolveIssue = (req, res) => updateIssue(req, res, true);
 
 exports.deleteIssue = async (req, res) => {
   let client;

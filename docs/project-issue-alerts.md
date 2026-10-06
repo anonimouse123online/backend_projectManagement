@@ -4,7 +4,7 @@ The backend uses the existing `project_issues` table. Projects and issues use UU
 
 ## Database setup
 
-Run `npm run migrate:project-issues` before starting the updated backend. Run this after either existing database setup script for new installations too. The migration is transactional and can be rerun. It backfills `project_id` from `projects.code`, severity from priority, and canonical statuses from the existing values. Existing resolved records without a resolution timestamp use their last update or creation timestamp.
+Run `npm run migrate:project-issues` and then `npm run migrate:issue-resolutions` before starting the updated backend. Run these after either existing database setup script for new installations too. The migrations are transactional and can be rerun. The alerts migration backfills `project_id` from `projects.code`, severity from priority, and canonical statuses from the existing values. Existing resolved records without a resolution timestamp use their last update or creation timestamp. See [Issue resolution feedback](issue-resolution-feedback.md) for the additional schema and API requirements.
 
 The table retains `project_code`, `priority`, location, assignment and resolution notes. A trigger synchronizes UUID/code and severity/priority, normalizes legacy status values, updates `updated_at`, sets `resolved_at` on resolution, and clears it on reopening. Status and severity have database constraints. A partial index supports active issue lookups.
 
@@ -57,7 +57,7 @@ Title and description are required. Category defaults to `other` and severity to
 
 Creation returns 201 with `data` containing the issue plus top-level `project_id`, `active_issue_count`, and `has_active_issues`. A project-scoped **New Project Issue** notification is saved in the same transaction; failed notification writes roll back issue creation. Notifications retain their existing code-based `project_id` contract.
 
-`PATCH /projects/:projectId/issues/:issueId` updates status, severity, title, description, category, location, assignment or resolution notes. `PUT` is also accepted. Changing status to `resolved` removes it from counts and sets `resolved_at`; reopening clears that timestamp. Issue project reassignment is rejected. Updates return 200 with the issue and current counts.
+`PATCH /projects/:projectId/issues/:issueId` updates status, severity, title, description, category, location, assignment or resolution notes. `PUT` is also accepted. Changing status to `resolved` now requires `resolution_summary`, a nonempty array of nonblank `resolution_steps`, and `final_remarks`, and only admins or project managers with project access may resolve. `PATCH /issues/:id/resolve` and `PATCH /projects/:projectId/issues/:issueId/resolve` accept the same feedback and set resolved status automatically. Resolution removes the issue from counts and sets `resolved_at`; reopening clears that timestamp and retains past feedback in `issue_resolutions`. Issue project reassignment is rejected. Updates return 200 with the issue, its current `resolution` (or null), and counts. A valid attempt to resolve a currently resolved issue returns 409.
 
 Existing `GET /issues/:id`, `PUT /issues/:id`, `PATCH /issues/:id`, and `DELETE /issues/:id` use the same records and authorization. Project-scoped DELETE is also supported.
 
