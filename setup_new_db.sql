@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   assignee_id         UUID REFERENCES users(id) ON DELETE SET NULL,
   due_date            DATE,
   priority            VARCHAR(20) DEFAULT 'Medium',
-  status              VARCHAR(50) DEFAULT 'Pending',
+  status              VARCHAR(50) DEFAULT 'pending',
   manpower_needed     TEXT,
   materials_required  TEXT,
   site_instructions   TEXT,
@@ -270,7 +270,6 @@ CREATE TABLE IF NOT EXISTS time_logs (
   materials_delivered TEXT,
   equipment_used      TEXT,
   additional_notes    TEXT,
-  has_incident        BOOLEAN DEFAULT FALSE,
   created_at          TIMESTAMP DEFAULT NOW(),
   updated_at          TIMESTAMP DEFAULT NOW()
 );
@@ -477,6 +476,6 @@ VALUES
   ('Welcome to SitePulse', 'Welcome to the SitePulse Construction Management platform. Review your assigned tasks and daily logs.', 'all', (SELECT id FROM users WHERE email = 'admin@sitepulse.com'));
 
 -- Time Logs
-INSERT INTO time_logs (project_name, engineer_name, date, work_on_site, supervisors, sub_contractors, total_work_hours, weather, temperature, work_completed, materials_delivered, equipment_used, additional_notes, has_incident)
+INSERT INTO time_logs (project_name, engineer_name, date, work_on_site, supervisors, sub_contractors, total_work_hours, weather, temperature, work_completed, materials_delivered, equipment_used, additional_notes)
 VALUES
-  ('Downtown Office Complex', 'Mike Johnson', CURRENT_DATE, 25, 3, 5, '8 hrs', 'Sunny', '31°C', 'Level 4 beam reinforcements and rebar installation.', '200 bags Portland Cement', '1x Tower Crane, 2x Concrete Mixers', 'All safety protocols followed.', FALSE);
+  ('Downtown Office Complex', 'Mike Johnson', CURRENT_DATE, 25, 3, 5, '8 hrs', 'Sunny', '31°C', 'Level 4 beam reinforcements and rebar installation.', '200 bags Portland Cement', '1x Tower Crane, 2x Concrete Mixers', 'All safety protocols followed.');

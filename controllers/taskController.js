@@ -1,5 +1,8 @@
 const pool = require('../db');
 const taskPhases = require('../services/taskPhaseService');
+const workStatuses = require('../services/taskWorkStatusService');
+const taskResources = require('../services/taskResourceService');
+const money = require('../services/moneyService');
 const { createTaskDiagnostics } = require('../services/taskCreationDiagnostics');
 const multer = require('multer');
 const path = require('path');
@@ -302,14 +305,14 @@ exports.getTasks = async function (req, res) {
       status !== 'All Statuses'
     ) {
 
-      params.push(
-        `%${status.replace('-', '%')}%`
-      );
-
-
-      conditions.push(
-        `t.status ILIKE $${params.length}`
-      );
+      const normalized = workStatuses.displayStatus(status);
+      if (['pending', 'ongoing'].includes(normalized)) {
+        params.push(normalized === 'ongoing' ? ['ongoing', 'in progress', 'in-progress'] : ['pending']);
+        conditions.push(`LOWER(TRIM(t.status)) = ANY($${params.length}::text[])`);
+      } else {
+        params.push(`%${status.replace('-', '%')}%`);
+        conditions.push(`t.status ILIKE $${params.length}`);
+      }
     }
 
 
@@ -493,30 +496,7 @@ exports.getTasks = async function (req, res) {
           '[]'::jsonb
         ) AS subtasks,
 
-        COALESCE(
-          t.progress_pct,
-
-          CASE
-
-            WHEN t.status
-              ILIKE 'completed'
-              THEN 100
-
-            WHEN
-              t.status ILIKE 'in progress'
-
-              OR t.status
-                ILIKE 'in-progress'
-
-              OR t.status
-                ILIKE 'ongoing'
-
-              THEN 50
-
-            ELSE 0
-
-          END
-        ) AS progress_pct
+        COALESCE(t.progress_pct, 0) AS progress_pct
 
 
       FROM tasks t
@@ -548,6 +528,8 @@ exports.getTasks = async function (req, res) {
         params
       );
 
+    const tasks = await taskResources.withResources(result.rows, pool);
+
 
     console.log(
       '[GET TASKS] returned',
@@ -561,7 +543,7 @@ exports.getTasks = async function (req, res) {
       success: true,
 
       data:
-        result.rows
+        tasks.map(workStatuses.taskFields)
 
     });
 
@@ -679,28 +661,7 @@ exports.getTaskById = async function (req, res) {
           p.status
             AS project_status,
 
-          COALESCE(
-            t.progress_pct,
-
-            CASE
-
-              WHEN t.status
-                ILIKE 'completed'
-                THEN 100
-
-              WHEN
-                t.status ILIKE 'in progress'
-
-                OR t.status ILIKE 'in-progress'
-
-                OR t.status ILIKE 'ongoing'
-
-                THEN 50
-
-              ELSE 0
-
-            END
-          ) AS progress_pct,
+          COALESCE(t.progress_pct, 0) AS progress_pct,
 
           COALESCE(
             t.subtasks,
@@ -784,12 +745,14 @@ exports.getTaskById = async function (req, res) {
     }
 
 
+    const [task] = await taskResources.withResources(result.rows, pool);
+
     return res.status(200).json({
 
       success: true,
 
       data:
-        result.rows[0]
+        workStatuses.taskFields(task)
 
     });
 
@@ -879,190 +842,33 @@ const syncProjectProgress = async (projectId, db = pool) => {
 exports.syncProjectProgress = syncProjectProgress;
 
 // ─── UPDATE TASK STATUS ───────────────────────────────────────────────────────
-exports.updateTaskStatus = async function (
-  req,
-  res
-) {
+function statusFailure(res, error) {
+  if (error instanceof workStatuses.WorkStatusError) return res.status(error.status).json({ success: false, error: error.message });
+  if (['23514', '22P02', '22003'].includes(error.code)) return res.status(400).json({ success: false, error: 'Invalid task status or progress.' });
+  console.error('Task work-status error:', error);
+  return res.status(500).json({ success: false, error: 'Failed to update task status.' });
+}
 
-  if (!requireAuth(req, res)) {
-    return;
+function requestProgress(body) {
+  if (Object.hasOwn(body, 'progress_pct') && Object.hasOwn(body, 'progress') &&
+      workStatuses.progressValue(body.progress_pct) !== workStatuses.progressValue(body.progress)) {
+    throw new workStatuses.WorkStatusError(400, 'progress and progress_pct must agree.');
   }
+  return Object.hasOwn(body, 'progress_pct') ? body.progress_pct : body.progress;
+}
 
-
-  const id =
-    req.params.id;
-
-
-  const status =
-    req.body.status;
-
-
-  let progress_pct =
-    req.body.progress_pct;
-
-
+exports.updateTaskStatus = async function (req, res) {
+  if (!requireAuth(req, res)) return;
   try {
-
-    const task =
-      await getAccessibleTask(
-        id,
-        req.user.id
-      );
-
-
-    if (!task) {
-
-      return res.status(404).json({
-        success: false,
-        error:
-          'Task not found or you do not have access.'
-      });
+    const body = req.body || {};
+    const progress = requestProgress(body);
+    const data = await workStatuses.saveWorkStatus({ taskId: req.params.id, userId: req.user.id,
+      user: req.user, status: body.status, progress }, pool, getAccessibleTask);
+    if (progress !== undefined || ['completed', 'done'].includes(workStatuses.displayStatus(body.status))) {
+      await syncProjectProgress(data.project_id);
     }
-
-
-    if (
-      progress_pct === undefined &&
-      status
-    ) {
-
-      const st =
-        status.toLowerCase();
-
-
-      if (
-        st.includes(
-          'completed'
-        )
-      ) {
-
-        progress_pct = 100;
-
-
-      } else if (
-        st.includes(
-          'pending'
-        )
-      ) {
-
-        progress_pct = 0;
-
-
-      } else if (
-        st.includes(
-          'in-progress'
-        ) ||
-
-        st.includes(
-          'ongoing'
-        ) ||
-
-        st.includes(
-          'in progress'
-        )
-      ) {
-
-        const current =
-          await pool.query(
-            `
-            SELECT
-              progress_pct
-
-            FROM tasks
-
-            WHERE id = $1::uuid
-            `,
-            [
-              id
-            ]
-          );
-
-
-        const currentValue =
-          current.rows[0]
-            ?.progress_pct || 0;
-
-
-        progress_pct =
-          currentValue > 0
-            ? currentValue
-            : 50;
-      }
-    }
-
-
-    const result =
-      await pool.query(
-        `
-        UPDATE tasks
-
-        SET
-          status =
-            COALESCE(
-              $1,
-              status
-            ),
-
-          progress_pct =
-            COALESCE(
-              $2,
-              progress_pct
-            ),
-
-          updated_at =
-            NOW()
-
-        WHERE id =
-          $3::uuid
-
-        RETURNING *, ${taskPhases.selectPhases('tasks')}
-        `,
-        [
-          status,
-          progress_pct,
-          id
-        ]
-      );
-
-    if (result.rows.length > 0) {
-      if (status && status.toLowerCase().includes('completed')) {
-        const cur = await pool.query(`SELECT subtasks FROM tasks WHERE id = $1::uuid`, [id]);
-        if (cur.rows.length && Array.isArray(cur.rows[0].subtasks)) {
-          const completedSubs = cur.rows[0].subtasks.map((s) => ({ ...s, completed: true }));
-          await pool.query(
-            `UPDATE tasks SET subtasks = $1 WHERE id = $2::uuid`,
-            [JSON.stringify(completedSubs), id]
-          );
-        }
-      }
-      await syncProjectProgress(result.rows[0].project_id);
-    }
-
-    return res.status(200).json({
-
-      success: true,
-
-      data:
-        result.rows[0]
-
-    });
-
-
-  } catch (err) {
-
-    console.error(
-      'updateTaskStatus error:',
-      err
-    );
-
-
-    return res.status(500).json({
-      success: false,
-      error:
-        'Failed to update task status.',
-      details:
-        err.message
-    });
-  }
+    return res.status(200).json({ success: true, data });
+  } catch (error) { return statusFailure(res, error); }
 };
 
 // ============================================================
@@ -1075,204 +881,36 @@ exports.updateTaskStatus = async function (
 // PATCH /tasks/:id/complete
 // ============================================================
 
-exports.completeTask = async function (
-  req,
-  res
-) {
-
-  if (!requireAuth(req, res)) {
-    return;
-  }
-
-
-  const taskId =
-    req.params.id ||
-    req.params.taskId;
-
-
+exports.completeTask = async function (req, res) {
+  if (!requireAuth(req, res)) return;
   try {
-
-    const task =
-      await getAccessibleTask(
-        taskId,
-        req.user.id
-      );
-
-
-    if (!task) {
-
-      return res.status(404).json({
-        success: false,
-        message:
-          'Task not found or you do not have access.'
-      });
-    }
-
-
-    const taskCurrent = await pool.query(
-      `SELECT id, project_id, subtasks FROM tasks WHERE id = $1::uuid`,
-      [taskId]
-    );
-    if (!taskCurrent.rows.length) {
-      return res.status(404).json({ success: false, error: 'Task not found or you do not have access.' });
-    }
-
-    const currentSubs = Array.isArray(taskCurrent.rows[0].subtasks)
-      ? taskCurrent.rows[0].subtasks.map((s) => ({ ...s, completed: true }))
-      : [];
-
-    const result =
-      await pool.query(
-        `
-        UPDATE tasks
-
-        SET
-          status = 'Completed',
-          progress_pct = 100,
-          subtasks = $1,
-          updated_at = NOW()
-
-        WHERE id = $2::uuid
-
-        RETURNING
-          id,
-          task_name,
-          project_id,
-          assignee_id,
-          status,
-          progress_pct,
-          updated_at,
-          ${taskPhases.selectPhases('tasks')}
-        `,
-        [
-          JSON.stringify(currentSubs),
-          taskId
-        ]
-      );
-
-    if (result.rows.length > 0) {
-      await syncProjectProgress(result.rows[0].project_id);
-    }
-
-
-    return res.status(200).json({
-
-      success: true,
-
-      message:
-        'Task marked as completed successfully.',
-
-      data:
-        result.rows[0]
-
-    });
-
-
-  } catch (err) {
-
-    console.error(
-      'completeTask error:',
-      err
-    );
-
-
-    return res.status(500).json({
-
-      success: false,
-
-      message:
-        'Failed to complete task.',
-
-      error:
-        err.message
-
-    });
-  }
-};
-// ─── UPDATE SUBTASKS & PROGRESS ───────────────────────────────────────────────
-exports.updateTaskSubtasks = async function(req, res) {
-  const id = req.params.id;
-  const { subtasks } = req.body;
-  console.log('[ROUTE] PATCH /tasks/' + id + '/subtasks');
-  try {
-    // Check if the project is in Planning or inactive
-    const taskProj = await pool.query(
-      `SELECT p.status AS project_status
-       FROM tasks t
-       JOIN projects p ON p.id = t.project_id
-       WHERE t.id = $1::uuid`,
-      [id]
-    );
-    if (taskProj.rows.length > 0) {
-      const pStatus = (taskProj.rows[0].project_status || '').trim().toLowerCase();
-      if (pStatus === 'planning' || pStatus === 'draft' || pStatus === 'pending') {
-        return res.status(400).json({
-          success: false,
-          error: 'Subtasks cannot be modified because the project is in planning and not yet activated.'
-        });
-      }
-    }
-
-    const subs = Array.isArray(subtasks) ? subtasks : [];
-    let pct = 0;
-    if (subs.length > 0) {
-      const doneCount = subs.filter(s => s.completed).length;
-      pct = Math.round((doneCount / subs.length) * 100);
-    }
-    let autoStatus = 'Pending';
-    if (pct === 100) autoStatus = 'Completed';
-    else if (pct > 0) autoStatus = 'In Progress';
-
-    const result = await pool.query(
-      `UPDATE tasks
-       SET subtasks = $1,
-           progress_pct = $2,
-           status = $3,
-           updated_at = NOW()
-       WHERE id = $4::uuid
-       RETURNING *, ${taskPhases.selectPhases('tasks')}`,
-      [JSON.stringify(subs), pct, autoStatus, id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Task not found.' });
-    }
-
-    await syncProjectProgress(result.rows[0].project_id);
-
-    console.log('[ROUTE] PATCH /tasks/' + id + '/subtasks → new progress:', pct + '%', 'status:', result.rows[0].status);
-    res.json({ success: true, data: result.rows[0] });
-  } catch (err) {
-    console.error('[ROUTE] PATCH /tasks/:id/subtasks ERROR:', err);
-    res.status(500).json({ error: 'Failed to update subtasks.' });
-  }
+    const data = await workStatuses.saveWorkStatus({ taskId: req.params.id || req.params.taskId,
+      userId: req.user.id, user: req.user, status: 'completed' }, pool, getAccessibleTask);
+    await syncProjectProgress(data.project_id);
+    return res.status(200).json({ success: true, message: 'Task marked as completed successfully.', data });
+  } catch (error) { return statusFailure(res, error); }
 };
 
-// ─── CREATE TASK ──────────────────────────────────────────────────────────────
-// ============================================================
-// CREATE TASK
-// POST /tasks
-// ============================================================
+// Existing route handles both individual status updates and legacy checkbox arrays.
 
-// ============================================================
-// CREATE TASK
-// POST /tasks
-// ============================================================
+exports.updateTaskSubtasks = async function (req, res) {
+  if (!requireAuth(req, res)) return;
+  try {
+    const body = req.body || {};
+    let data;
+    if (Object.hasOwn(body, 'subtask_id')) {
+      data = await workStatuses.saveWorkStatus({ taskId: req.params.id, userId: req.user.id,
+        user: req.user, subtaskId: body.subtask_id, status: body.status, progress: requestProgress(body) }, pool, getAccessibleTask);
+    } else {
+      const saved = await workStatuses.saveSubtasks({ taskId: req.params.id, user: req.user, subtasks: body.subtasks }, pool, getAccessibleTask);
+      data = saved.data;
+      if (saved.completionChanged) await syncProjectProgress(data.project_id);
+    }
+    return res.status(200).json({ success: true, data });
+  } catch (error) { return statusFailure(res, error); }
+};
 
-// ============================================================
-// CREATE TASK
-// POST /tasks
-// ============================================================
-
-// ============================================================
-// CREATE TASK
-// POST /tasks
-// ============================================================
-
-// ============================================================
-// CREATE TASK
-// POST /tasks
-// ============================================================
+// POST /tasks: existing metadata, category, resource and project-progress workflow.
 
 exports.createTask = async function (req, res) {
 
@@ -1312,7 +950,7 @@ exports.createTask = async function (req, res) {
     // ============================================================
 
     const phases = taskPhases.phasesOf(req.body, true);
-    receivedPhase = req.body.phases || req.body.phase;
+    receivedPhase = req.body.construction_phase_categories || req.body.phases || req.body.phase;
     phase = phases[0]; // Deprecated scalar compatibility value only.
 
 
@@ -1433,6 +1071,16 @@ exports.createTask = async function (req, res) {
         error: 'Site instructions are required.'
       });
     }
+
+    const rawAllocated = req.body.allocatedMaterials || req.body.allocated_materials;
+    const allocatedMaterials = Array.isArray(rawAllocated) ? rawAllocated.map(item => {
+      if (!item || !item.name || !item.name.trim()) return item;
+      return {
+        ...item,
+        quantity: money.quantityValue(item.quantity ?? 0, 'allocated material quantity'),
+        unitPrice: money.moneyValue(item.unitPrice ?? item.unit_price ?? 0, 'allocated material unitPrice'),
+      };
+    }) : rawAllocated;
 
 
     // ============================================================
@@ -1627,11 +1275,15 @@ exports.createTask = async function (req, res) {
               id: String(st.id || `${Date.now()}_${idx}`),
               title: String(st.title || st.name || '').trim(),
               completed: Boolean(st.completed),
+              ...(st.status === undefined ? {} : { status: st.status }),
+              ...(st.progress === undefined ? {} : { progress: st.progress }),
+              ...(st.progress_pct === undefined ? {} : { progress_pct: st.progress_pct }),
             };
           }
           return null;
         })
         .filter((st) => st && st.title.length > 0);
+      initialSubtasks = workStatuses.mergeSubtasks([], initialSubtasks);
     }
 
     const doneCount = initialSubtasks.filter((s) => s.completed).length;
@@ -1640,12 +1292,9 @@ exports.createTask = async function (req, res) {
         ? Math.round((doneCount / initialSubtasks.length) * 100)
         : 0;
 
-    let initialStatus = 'Pending';
-    if (initialProgressPct === 100) {
-      initialStatus = 'Completed';
-    } else if (initialProgressPct > 0) {
-      initialStatus = 'In Progress';
-    }
+    const initialStatus = workStatuses.databaseStatus(
+      initialProgressPct === 100 ? 'completed' : initialProgressPct > 0 ? 'ongoing' : 'pending'
+    );
 
     // ============================================================
     // CREATE TASK
@@ -1729,34 +1378,33 @@ exports.createTask = async function (req, res) {
     // SYNC MATERIALS & RESOURCES TO INVENTORY (resources table)
     // ============================================================
     try {
-      const rawAllocated = req.body.allocatedMaterials || req.body.allocated_materials;
       const projectName = project.name;
 
-      if (Array.isArray(rawAllocated) && rawAllocated.length > 0) {
-        for (const item of rawAllocated) {
+      if (Array.isArray(allocatedMaterials) && allocatedMaterials.length > 0) {
+        for (const item of allocatedMaterials) {
           if (!item || !item.name || !item.name.trim()) continue;
 
           const itemName = item.name.trim();
           const category = item.category === 'Equipment' ? 'Equipment' : 'Material';
           const supplier = (item.supplier || 'General Supplier').trim();
-          const quantity = parseInt(item.quantity) || 0;
+          const quantity = item.quantity;
           const unit = (item.unit || (category === 'Equipment' ? 'units' : 'bags')).trim();
           const minThreshold = parseInt(item.minThreshold || item.min_threshold) || 10;
-          const unitPrice = parseFloat(item.unitPrice || item.unit_price) || 0;
+          const unitPrice = item.unitPrice;
 
           // Check if resource already exists for this project
           const existingRes = await db.query(
-            `SELECT id, quantity, min_threshold FROM resources
+            `SELECT id, COALESCE(quantity, 0)::numeric + $3::numeric AS new_quantity, min_threshold FROM resources
              WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
                AND LOWER(TRIM(project)) = LOWER(TRIM($2))
              LIMIT 1`,
-            [itemName, projectName]
+            [itemName, projectName, quantity]
           );
 
           if (existingRes.rows.length > 0) {
             const current = existingRes.rows[0];
-            const newQty = (current.quantity || 0) + quantity;
-            const status = newQty <= (current.min_threshold || 10)
+            const newQty = current.new_quantity;
+            const status = Number(newQty) <= Number(current.min_threshold || 10)
               ? 'Low stock'
               : (category === 'Equipment' ? 'Available' : 'In stock');
 
@@ -1769,7 +1417,7 @@ exports.createTask = async function (req, res) {
             );
           } else {
             const status = quantity <= minThreshold
-              ? (quantity === 0 ? 'Out of stock' : 'Low stock')
+              ? (Number(quantity) === 0 ? 'Out of stock' : 'Low stock')
               : (category === 'Equipment' ? 'Available' : 'In stock');
 
             await db.query(
@@ -1788,7 +1436,7 @@ exports.createTask = async function (req, res) {
           let unit = 'units';
           let name = part;
           if (match) {
-            qty = parseInt(match[1]) || 1;
+            qty = money.quantityValue(match[1], 'material quantity');
             unit = match[2] || 'units';
             name = match[3].trim();
           }
@@ -1796,17 +1444,17 @@ exports.createTask = async function (req, res) {
           if (!name) continue;
 
           const existingRes = await db.query(
-            `SELECT id, quantity, min_threshold FROM resources
+            `SELECT id, COALESCE(quantity, 0)::numeric + $3::numeric AS new_quantity, min_threshold FROM resources
              WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
                AND LOWER(TRIM(project)) = LOWER(TRIM($2))
              LIMIT 1`,
-            [name, projectName]
+            [name, projectName, qty]
           );
 
           if (existingRes.rows.length > 0) {
             const current = existingRes.rows[0];
-            const newQty = (current.quantity || 0) + qty;
-            const status = newQty <= (current.min_threshold || 10) ? 'Low stock' : 'In stock';
+            const newQty = current.new_quantity;
+            const status = Number(newQty) <= Number(current.min_threshold || 10) ? 'Low stock' : 'In stock';
             await db.query(
               `UPDATE resources
                SET quantity = $1${generatedResourceStatus ? '' : ', status = $2'}, updated_at = NOW()
@@ -1842,7 +1490,7 @@ exports.createTask = async function (req, res) {
         'Task created successfully.',
 
       data:
-        createdTask
+        workStatuses.taskFields(createdTask)
 
     });
 
@@ -1853,7 +1501,7 @@ exports.createTask = async function (req, res) {
       try { await db.query('ROLLBACK'); }
       catch (rollbackError) { console.error('Task creation rollback failed:', rollbackError.message); }
     }
-    if (err instanceof taskPhases.PhaseError) {
+    if (err instanceof taskPhases.PhaseError || err instanceof workStatuses.WorkStatusError || err instanceof money.MoneyError) {
       return res.status(400).json({ success: false, message: err.message });
     }
 
@@ -1928,7 +1576,7 @@ exports.updateTask = async function (req, res) {
       await client.query('ROLLBACK'); transaction = false;
       return res.status(404).json({ success: false, error: 'Task not found or you do not have access.' });
     }
-    if (Object.hasOwn(body, 'phase') && !Object.hasOwn(body, 'phases')) {
+    if (Object.hasOwn(body, 'phase') && !Object.hasOwn(body, 'phases') && !Object.hasOwn(body, 'construction_phase_categories')) {
       const current = await client.query('SELECT COUNT(*)::int AS count FROM task_phases WHERE task_id = $1', [task.id]);
       if (current.rows[0].count > 1) throw new taskPhases.PhaseError('Use phases to edit a task with multiple construction phase categories.');
     }
@@ -1938,7 +1586,7 @@ exports.updateTask = async function (req, res) {
     if (phases) await taskPhases.replacePhases(task.id, phases, client);
     const updated = await taskPhases.withPhases(result.rows[0], client);
     await client.query('COMMIT'); transaction = false;
-    return res.status(200).json({ success: true, message: 'Task updated successfully.', data: updated });
+    return res.status(200).json({ success: true, message: 'Task updated successfully.', data: workStatuses.taskFields(updated) });
   } catch (error) {
     if (transaction) {
       try { await client.query('ROLLBACK'); }
@@ -2104,7 +1752,7 @@ exports.assignTask = async function (
       success: true,
 
       data:
-        result.rows[0]
+        workStatuses.taskFields(result.rows[0])
 
     });
 

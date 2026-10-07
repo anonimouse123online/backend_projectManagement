@@ -20,6 +20,17 @@ test('missing, empty and unsupported categories are rejected', () => {
   assert.throws(() => phases.phasesOf({ phase: 'Foundation', phases: [] }, true), { status: 400 });
 });
 
+test('construction_phase_categories accepts every selection and takes precedence over compatibility fields', () => {
+  assert.deepEqual(phases.phasesOf({ construction_phase_categories: phases.PHASES }, true), phases.PHASES);
+  assert.deepEqual(phases.phasesOf({
+    construction_phase_categories: ['Site Development', ' Structural ', 'Structural'],
+    phases: ['Turnover Phase'], phase: 'Foundation',
+  }, true), ['Site Development', 'Structural']);
+  for (const value of [null, undefined, [], '', 'Structural', [''], ['Unsupported']]) {
+    assert.throws(() => phases.phasesOf({ construction_phase_categories: value, phases: ['Structural'], phase: 'Foundation' }, true), { status: 400 });
+  }
+});
+
 test('legacy scalar names map safely and explicit arrays take precedence', () => {
   for (const [input, expected] of [
     ['Foundation', 'Site Development'], ['Phase 1 - Foundation', 'Site Development'],
@@ -51,10 +62,12 @@ test('create and edit controllers reject unauthenticated and invalid phase reque
       await fn({ params: {}, body: {} }, res);
       assert.equal(res.code, 401);
       for (const value of [null, [], 'Structural', ['Unsupported'], ['']]) {
-        await fn({ user: { id: 'user' }, params: {}, body: { task_name: 'Task', phases: value } }, res);
-        assert.equal(res.code, 400);
-        assert.equal(res.body.success, false);
-        assert.equal(typeof res.body.message, 'string');
+        for (const field of ['phases', 'construction_phase_categories']) {
+          await fn({ user: { id: 'user' }, params: {}, body: { task_name: 'Task', [field]: value } }, res);
+          assert.equal(res.code, 400);
+          assert.equal(res.body.success, false);
+          assert.equal(typeof res.body.message, 'string');
+        }
       }
     }
     await controller.createTask({ user: { id: 'user' }, body: { task_name: 'Task' }, params: {} }, res);

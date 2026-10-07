@@ -27,7 +27,8 @@ function normalizeLegacy(value) {
 }
 
 function phasesOf(body, required = false) {
-  if (!own(body, 'phases')) {
+  const arrayKey = own(body, 'construction_phase_categories') ? 'construction_phase_categories' : 'phases';
+  if (!own(body, arrayKey)) {
     // Existing single-select callers remain accepted during migration.
     if (own(body, 'phase')) {
       const phase = normalizeLegacy(body.phase);
@@ -37,8 +38,8 @@ function phasesOf(body, required = false) {
     if (required) throw new PhaseError();
     return null; // Partial updates must not remove existing relations.
   }
-  if (!Array.isArray(body.phases) || !body.phases.length) throw new PhaseError();
-  const phases = body.phases.map(value => {
+  if (!Array.isArray(body[arrayKey]) || !body[arrayKey].length) throw new PhaseError();
+  const phases = body[arrayKey].map(value => {
     if (typeof value !== 'string' || !PHASES.includes(value.trim())) throw new PhaseError();
     return value.trim();
   });

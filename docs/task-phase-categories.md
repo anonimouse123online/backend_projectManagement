@@ -91,6 +91,13 @@ must use the API or synchronize the relation explicitly in their own transaction
 
 ## Create-task contract
 
+The frontend sends `construction_phase_categories: string[]`. Create and metadata
+edit accept this field as an alias for `phases`, using the same nonempty-array
+validation and persistence. If both array names are supplied,
+`construction_phase_categories` takes precedence, including when invalid. Existing
+`phases` clients and response arrays retain their contract; task responses still
+return `phases`. No additional database migration is required for this alias.
+
 `POST /tasks` requires the existing Bearer JWT and preserves the existing project-access,
 active-assignee, membership, date, resource, and subtask rules. New clients send:
 
