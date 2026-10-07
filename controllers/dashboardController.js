@@ -81,8 +81,7 @@ exports.getStats = async (req, res) => {
 
         COUNT(*) FILTER (
           WHERE
-            status = 'Ongoing'
-            OR status = 'Planning'
+            LOWER(status) = 'ongoing'
         ) AS active
 
       FROM projects p
@@ -217,7 +216,6 @@ exports.getStats = async (req, res) => {
     const activeProjects =
       parseInt(
         projRes.rows[0]?.active ??
-        projRes.rows[0]?.total ??
         0
       ) || 0;
 
@@ -1196,6 +1194,7 @@ exports.getOverallProgress = async (req, res) => {
 
           COUNT(*) FILTER (
             WHERE p.status = 'Planning'
+               OR p.status = 'Pending'
           ) AS planning,
 
 
