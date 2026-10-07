@@ -434,10 +434,25 @@ router.post(
             );
 
 
-            await sendResetOtp(
-                cleanEmail,
-                code
-            );
+            try {
+                await sendResetOtp(
+                    cleanEmail,
+                    code
+                );
+            } catch (emailError) {
+                console.error("❌ Forgot password email delivery failed:", emailError.message);
+                if (process.env.NODE_ENV !== "production") {
+                    console.log(`\n==================================================`);
+                    console.log(`🔑 [DEV RESET OTP] Recipient: ${cleanEmail} | Code: ${code}`);
+                    console.log(`==================================================\n`);
+                    return res.status(200).json({
+                        success: true,
+                        message: `Verification code generated! (Email delivery failed: check server terminal. Code: ${code})`,
+                        dev_code: code,
+                    });
+                }
+                throw emailError;
+            }
 
 
             console.log(

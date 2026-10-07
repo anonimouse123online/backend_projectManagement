@@ -73,12 +73,28 @@ exports.sendVerificationCode = async (req, res) => {
     // Store securely in memory with 15-minute expiration (900,000 ms)
     verificationStore.setCode(normalizedEmail, code, 15 * 60 * 1000);
 
-    // Send email to user using EmailJS REST API
-    await sendVerificationCodeEmail(normalizedEmail, code);
+    console.log(`\n==================================================`);
+    console.log(`🔑 [AUTH DEV OTP] Recipient: ${normalizedEmail} | Code: ${code}`);
+    console.log(`==================================================\n`);
 
-    return res.status(200).json({
-      message: 'Verification code sent! Please check your email inbox.',
-    });
+    // Send email to user using EmailJS REST API
+    try {
+      await sendVerificationCodeEmail(normalizedEmail, code);
+      return res.status(200).json({
+        message: 'Verification code sent! Please check your email inbox.',
+      });
+    } catch (emailError) {
+      console.error('sendVerificationCode email dispatch error:', emailError.message);
+      if (process.env.NODE_ENV !== 'production') {
+        return res.status(200).json({
+          message: `Verification code generated! (Email delivery failed: check server terminal. Code: ${code})`,
+          dev_code: code,
+        });
+      }
+      return res.status(500).json({
+        error: 'Failed to send verification code email.',
+      });
+    }
   } catch (error) {
     console.error('sendVerificationCode error:', error.message);
     return res.status(500).json({
@@ -293,13 +309,28 @@ exports.resendVerification = async (req, res) => {
     // 3. Store new code with reset 15-minute expiration
     verificationStore.setCode(normalizedEmail, newCode, 15 * 60 * 1000);
 
-    // 4. Send email via EmailJS REST API
-    await sendVerificationCodeEmail(normalizedEmail, newCode);
+    console.log(`\n==================================================`);
+    console.log(`🔑 [AUTH DEV OTP] Resend Recipient: ${normalizedEmail} | Code: ${newCode}`);
+    console.log(`==================================================\n`);
 
-    return res.status(200).json({
-      message: 'Verification code sent! Please check your email inbox.',
-    });
-
+    try {
+      // 4. Send email via EmailJS REST API
+      await sendVerificationCodeEmail(normalizedEmail, newCode);
+      return res.status(200).json({
+        message: 'Verification code sent! Please check your email inbox.',
+      });
+    } catch (emailError) {
+      console.error('resendVerification email dispatch error:', emailError.message);
+      if (process.env.NODE_ENV !== 'production') {
+        return res.status(200).json({
+          message: `Verification code generated! (Email delivery failed: check server terminal. Code: ${newCode})`,
+          dev_code: newCode,
+        });
+      }
+      return res.status(500).json({
+        error: 'Failed to resend verification code.',
+      });
+    }
   } catch (error) {
     console.error('resendVerification error:', error.message);
     return res.status(500).json({
