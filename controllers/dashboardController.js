@@ -1,4 +1,5 @@
 const pool = require('../db');
+const taskPhases = require('../services/taskPhaseService');
 
 
 // ============================================================
@@ -126,7 +127,7 @@ exports.getStats = async (req, res) => {
 
       WHERE ${PROJECT_ACCESS_SQL}
 
-        AND i.status != 'Resolved'
+        AND i.status IN ('open', 'in_progress')
     `;
 
 
@@ -883,12 +884,12 @@ exports.getGaugeStats = async (req, res) => {
     ) {
 
       params.push(
-        `%${category}%`
+        taskPhases.filterValue(category)
       );
 
 
       conditions.push(
-        `t.phase ILIKE $${params.length}`
+        taskPhases.filterPhases(params.length)
       );
     }
 
@@ -1058,12 +1059,12 @@ exports.getOverallProgress = async (req, res) => {
     ) {
 
       taskParams.push(
-        `%${category}%`
+        taskPhases.filterValue(category)
       );
 
 
       taskConditions.push(
-        `t.phase ILIKE $${taskParams.length}`
+        taskPhases.filterPhases(taskParams.length)
       );
     }
 
@@ -1150,7 +1151,7 @@ exports.getOverallProgress = async (req, res) => {
     ) {
 
       projectParams.push(
-        `%${category}%`
+        taskPhases.filterValue(category)
       );
 
 
@@ -1165,8 +1166,7 @@ exports.getOverallProgress = async (req, res) => {
 
           WHERE category_task.project_id = p.id
 
-            AND category_task.phase
-              ILIKE $${projectParams.length}
+            AND ${taskPhases.filterPhases(projectParams.length, 'category_task')}
 
         )
       `);

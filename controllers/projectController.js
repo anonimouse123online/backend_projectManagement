@@ -1,5 +1,7 @@
 const pool = require('../db');
+const taskPhases = require('../services/taskPhaseService');
 const projectService = require('../services/projectService');
+const { countColumns, countJoin } = require('../services/projectIssueService');
 const crypto = require('crypto');
 const path = require('path');
 
@@ -180,7 +182,8 @@ const getAllProjects = async (req, res) => {
         search,
         code,
         req.user.id,
-        req.user.email
+        req.user.email,
+        req.user.role
       );
 
 
@@ -233,7 +236,8 @@ const getProjectByCode = async (req, res) => {
       await projectService.getByCode(
         code,
         req.user.id,
-        req.user.email
+        req.user.email,
+        req.user.role
       );
 
 
@@ -1074,6 +1078,7 @@ const getJoinedProjects = async (req, res) => {
         `
         SELECT DISTINCT
           p.id,
+          ${countColumns},
           p.code,
           p.name,
           p.location,
@@ -1112,6 +1117,7 @@ const getJoinedProjects = async (req, res) => {
 
         INNER JOIN projects p
           ON p.code = pm.project_id
+        ${countJoin}
 
         WHERE
           pm.user_id = $1
@@ -1823,7 +1829,7 @@ const getProjectStats = async (req, res) => {
           FROM project_issues
 
           WHERE project_code = $1
-            AND status != 'Resolved'
+            AND status IN ('open', 'in_progress')
           `,
           [
             code
@@ -1990,6 +1996,8 @@ const getProjectActiveTask = async (req, res) => {
         SELECT
           t.id,
           t.task_name AS title,
+          t.phase,
+          ${taskPhases.selectPhases()},
           t.status,
           u.full_name AS assignee
 
@@ -2809,7 +2817,7 @@ const getProjectProgress = async (req, res) => {
       await pool.query(
         `
         SELECT
-          phase,
+          tp.phase,
 
           COUNT(*)
             AS total_tasks,
@@ -2822,13 +2830,13 @@ const getProjectProgress = async (req, res) => {
             WHERE LOWER(status) = 'in progress'
           ) AS in_progress_tasks
 
-        FROM tasks
+        FROM tasks t JOIN task_phases tp ON tp.task_id = t.id
 
-        WHERE project_id = $1
+        WHERE t.project_id = $1
 
-        GROUP BY phase
+        GROUP BY tp.phase
 
-        ORDER BY phase
+        ORDER BY tp.phase
         `,
         [
           project.id

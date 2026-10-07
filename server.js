@@ -6,6 +6,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const http = require('http');
 const path = require('path');
+const { configureTrustedProxy } = require('./configuration/trustedProxy');
 
 const routes = require('./routes/index');
 
@@ -35,6 +36,7 @@ const initializeSocket =
 // ============================================================
 
 const app = express();
+configureTrustedProxy(app);
 
 
 // ============================================================
