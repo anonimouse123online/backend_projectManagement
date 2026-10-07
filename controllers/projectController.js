@@ -1,6 +1,8 @@
 const pool = require('../db');
 const taskPhases = require('../services/taskPhaseService');
+const workStatuses = require('../services/taskWorkStatusService');
 const projectService = require('../services/projectService');
+const money = require('../services/moneyService');
 const { countColumns, countJoin } = require('../services/projectIssueService');
 const crypto = require('crypto');
 const path = require('path');
@@ -459,7 +461,7 @@ const createProject = async (req, res) => {
       !location ||
       !scope ||
       !client ||
-      !budget ||
+      budget == null || budget === '' ||
       !start_date ||
       !end_date
     ) {
@@ -469,6 +471,8 @@ const createProject = async (req, res) => {
         message: 'Name, location, scope, client, budget, start_date, and end_date are required.'
       });
     }
+
+    const projectBudget = money.moneyValue(budget, 'budget', 13);
 
     let projectCode = (code || '').trim();
     if (!projectCode) {
@@ -561,7 +565,7 @@ const createProject = async (req, res) => {
         location.trim(),
         scope.trim(),
         client.trim(),
-        budget,
+        projectBudget,
         start_date,
         end_date,
         projectPhase,
@@ -578,6 +582,10 @@ const createProject = async (req, res) => {
 
 
   } catch (err) {
+
+    if (err instanceof money.MoneyError) {
+      return res.status(400).json({ success: false, message: err.message });
+    }
 
     console.error(
       'createProject error:',
@@ -1071,8 +1079,30 @@ const getJoinedProjects = async (req, res) => {
     const { rows } =
       await pool.query(
         `
+        SELECT
+          id,
+          active_issue_count,
+          has_active_issues,
+          code,
+          name,
+          location,
+          scope,
+          client,
+          budget,
+          phase,
+          status,
+          owner_id,
+          progress,
+          start_date,
+          due_date,
+          member_role,
+          access_type,
+          manager
+
+        FROM (
         SELECT DISTINCT
           p.id,
+          p.created_at,
           ${countColumns},
           p.code,
           p.name,
@@ -1122,9 +1152,10 @@ const getJoinedProjects = async (req, res) => {
           ) = LOWER(
             TRIM($2)
           )
+        ) AS joined_projects
 
         ORDER BY
-          p.name ASC
+          joined_projects.created_at ASC
         `,
         [
           userId,
@@ -1788,7 +1819,7 @@ const getProjectStats = async (req, res) => {
             ) AS active_tasks,
 
             COUNT(*) FILTER (
-              WHERE status = 'Pending'
+              WHERE LOWER(status) = 'pending'
             ) AS pending_task_issues
 
           FROM tasks
@@ -1834,17 +1865,7 @@ const getProjectStats = async (req, res) => {
         pool.query(
           `
           SELECT
-            COALESCE(p.budget, 0)::numeric AS budget_allocated,
-
-            COALESCE(
-              (
-                SELECT SUM(COALESCE(r.quantity, 0) * COALESCE(r.unit_price, 0))
-                FROM resources r
-                WHERE LOWER(TRIM(r.project)) = LOWER(TRIM(p.code))
-                   OR LOWER(TRIM(r.project)) = LOWER(TRIM(p.name))
-                   OR r.task_id IN (SELECT id FROM tasks WHERE project_id = p.id)
-              ), 0
-            )::numeric AS total_resource_cost
+            ${money.projectBudgetColumns}
           FROM projects p
           WHERE p.code = $1
           `,
@@ -1869,9 +1890,10 @@ const getProjectStats = async (req, res) => {
           ?.pending_task_issues
       ) || 0;
 
-    const budgetAllocated = parseFloat(budgetStats.rows[0]?.budget_allocated || 0);
-    const totalSpent = parseFloat(budgetStats.rows[0]?.total_resource_cost || 0);
-    const remainingBudget = budgetAllocated - totalSpent;
+    // Convert only final SQL results to preserve the existing JSON number fields.
+    const budgetAllocated = Number(budgetStats.rows[0]?.budget_allocated || 0);
+    const totalSpent = Number(budgetStats.rows[0]?.total_resource_cost || 0);
+    const remainingBudget = Number(budgetStats.rows[0]?.remaining_budget || 0);
 
 
     return res.status(200).json({
@@ -1994,6 +2016,8 @@ const getProjectActiveTask = async (req, res) => {
           t.phase,
           ${taskPhases.selectPhases()},
           t.status,
+          t.progress_pct,
+          t.subtasks,
           u.full_name AS assignee
 
         FROM tasks t
@@ -2031,7 +2055,7 @@ const getProjectActiveTask = async (req, res) => {
       success: true,
 
       data:
-        rows[0] || null
+        workStatuses.taskFields(rows[0]) || null
 
     });
 

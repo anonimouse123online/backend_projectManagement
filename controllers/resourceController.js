@@ -1,4 +1,5 @@
 const pool = require('../db');
+const money = require('../services/moneyService');
 
 exports.getResources = async (req, res) => {
   try {
@@ -56,6 +57,8 @@ exports.getResources = async (req, res) => {
 exports.createResource = async (req, res) => {
   try {
     const { name, supplier, category, quantity, unit, minThreshold, unitPrice, project, taskId, taskName } = req.body;
+    const price = money.moneyValue(unitPrice, 'unitPrice');
+    const resourceQuantity = money.quantityValue(quantity ?? 0, 'quantity');
     const targetTaskId = taskId && taskId !== 'none' && taskId !== '' ? taskId : null;
     let targetTaskName = taskName && taskName.trim() ? taskName.trim() : null;
 
@@ -66,7 +69,7 @@ exports.createResource = async (req, res) => {
       }
     }
 
-    const qtyNum = parseFloat(quantity) || 0;
+    const qtyNum = Number(resourceQuantity);
     const threshNum = parseFloat(minThreshold) || 0;
     let computedStatus = 'In stock';
     if (qtyNum <= 0) {
@@ -88,7 +91,7 @@ exports.createResource = async (req, res) => {
          unit_price AS "unitPrice", project, status,
          task_id AS "taskId", task_name AS "taskName",
          TO_CHAR(updated_at, 'Mon DD, YYYY') AS "updatedAt"`,
-      [name, supplier, category, qtyNum, unit, threshNum, unitPrice, project, targetTaskId, targetTaskName, computedStatus]
+      [name, supplier, category, resourceQuantity, unit, threshNum, price, project, targetTaskId, targetTaskName, computedStatus]
     );
 
     // If assigned to a task, sync/append this material to the task's materials_required
@@ -109,6 +112,7 @@ exports.createResource = async (req, res) => {
 
     res.status(201).json({ success: true, data: rows[0] });
   } catch (err) {
+    if (err instanceof money.MoneyError) return res.status(400).json({ error: err.message });
     console.error('createResource error:', err);
     res.status(500).json({ error: 'Failed to create resource.' });
   }
@@ -118,10 +122,12 @@ exports.updateResource = async (req, res) => {
   try {
     const { id } = req.params;
     const { name, supplier, category, quantity, unit, minThreshold, unitPrice, project, taskId, taskName } = req.body;
+    const price = money.moneyValue(unitPrice, 'unitPrice');
+    const resourceQuantity = money.quantityValue(quantity ?? 0, 'quantity');
     const targetTaskId = taskId && taskId !== 'none' && taskId !== '' ? taskId : null;
     const targetTaskName = taskName && taskName.trim() ? taskName.trim() : null;
 
-    const qtyNum = parseFloat(quantity) || 0;
+    const qtyNum = Number(resourceQuantity);
     const threshNum = parseFloat(minThreshold) || 0;
     let computedStatus = 'In stock';
     if (qtyNum <= 0) {
@@ -145,11 +151,12 @@ exports.updateResource = async (req, res) => {
          unit_price AS "unitPrice", project, status,
          task_id AS "taskId", task_name AS "taskName",
          TO_CHAR(updated_at, 'Mon DD, YYYY') AS "updatedAt"`,
-      [name, supplier, category, qtyNum, unit, threshNum, unitPrice, project, targetTaskId, targetTaskName, computedStatus, id]
+      [name, supplier, category, resourceQuantity, unit, threshNum, price, project, targetTaskId, targetTaskName, computedStatus, id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Resource not found.' });
     res.json({ success: true, data: rows[0] });
   } catch (err) {
+    if (err instanceof money.MoneyError) return res.status(400).json({ error: err.message });
     console.error('updateResource error:', err);
     res.status(500).json({ error: 'Failed to update resource.' });
   }

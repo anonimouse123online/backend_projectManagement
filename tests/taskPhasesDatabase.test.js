@@ -140,7 +140,7 @@ test('PostgreSQL migration and task HTTP workflows preserve legacy data and atom
     const single = response.body.data;
     assert.deepEqual(single.phases, ['Site Development']);
     assert.equal(single.phase, 'Site Development');
-    assert.equal(single.status, 'In Progress');
+    assert.equal(single.status, 'ongoing');
     assert.equal(single.progress_pct, 50);
     assert.equal(single.subtasks.length, 2);
     const successfulRequestId = operationLogs.mock.calls.find(call => call.arguments[0] === '[CREATE TASK] inserting task (including embedded subtasks)').arguments[1].request_id;
@@ -153,8 +153,10 @@ test('PostgreSQL migration and task HTTP workflows preserve legacy data and atom
     }
     assert.equal(labels.filter(label => label === '[CREATE TASK] database connection').length, 1);
     assert.equal((await client.query('SELECT COUNT(*)::int AS count FROM resources')).rows[0].count, 1);
-    response = await request('/tasks', 'POST', { ...baseBody, task_name: 'Combined works',
-      phases: [' Structural ', 'Site Development', 'Structural', 'Construction Phase'] });
+    const multiBody = { ...baseBody, task_name: 'Combined works',
+      construction_phase_categories: [' Structural ', 'Site Development', 'Structural', 'Construction Phase'] };
+    delete multiBody.phases;
+    response = await request('/tasks', 'POST', multiBody);
     assert.equal(response.status, 201, JSON.stringify(response.body));
     const multi = response.body.data;
     assert.equal(multi.phase, 'Structural');
@@ -163,6 +165,8 @@ test('PostgreSQL migration and task HTTP workflows preserve legacy data and atom
     for (const phases of [[], null, 'Structural', ['Unsupported'], [''], ['Structural', ' ']]) {
       assert.equal((await request('/tasks', 'POST', { ...baseBody, phases })).status, 400);
       assert.equal((await request(`/tasks/${multi.id}`, 'PATCH', { phases })).status, 400);
+      assert.equal((await request('/tasks', 'POST', { ...baseBody, construction_phase_categories: phases })).status, 400);
+      assert.equal((await request(`/tasks/${multi.id}`, 'PATCH', { construction_phase_categories: phases })).status, 400);
     }
     const withoutPhases = { ...baseBody };
     delete withoutPhases.phases;
@@ -186,7 +190,9 @@ test('PostgreSQL migration and task HTTP workflows preserve legacy data and atom
     assert.equal((await request(`/tasks/${randomUUID()}`, 'PATCH', { phases: ['Architectural'] })).status, 404);
     assert.equal((await request(`/tasks/${multi.id}`, 'PATCH', { phase: 'Finishing' })).status, 400);
     assert.deepEqual((await request(`/tasks/${multi.id}`)).body.data.phases, multi.phases);
-    response = await request(`/tasks/${multi.id}`, 'PATCH', { phases: ['Architectural', 'Turnover Phase', 'Architectural'] });
+    response = await request(`/tasks/${multi.id}`, 'PATCH', {
+      construction_phase_categories: ['Architectural', 'Turnover Phase', 'Architectural'], phase: 'Foundation',
+    });
     assert.equal(response.status, 200);
     assert.equal(response.body.data.phase, 'Architectural');
     assert.deepEqual(response.body.data.phases, ['Architectural', 'Turnover Phase']);
@@ -227,6 +233,9 @@ test('PostgreSQL migration and task HTTP workflows preserve legacy data and atom
     response = await request(`/projects/${code}/active-task`);
     assert.equal(response.status, 200);
     assert.ok(Array.isArray(response.body.data.phases));
+    assert.equal(typeof response.body.data.status, 'string');
+    assert.equal(typeof response.body.data.progress, 'number');
+    assert.equal(typeof response.body.data.progress_pct, 'number');
 
     const snapshot = async () => ({
       taskCount: (await client.query('SELECT COUNT(*)::int AS count FROM tasks')).rows[0].count,
@@ -268,7 +277,7 @@ test('PostgreSQL migration and task HTTP workflows preserve legacy data and atom
           ...(allocated ? { allocatedMaterials: [{ name, category: 'Equipment', quantity: 20, minThreshold: 10 }] } : {}),
         });
         assert.equal(response.status, 201, JSON.stringify(response.body));
-        assert.equal(response.body.data.status, 'In Progress');
+        assert.equal(response.body.data.status, 'ongoing');
         const resource = (await client.query('SELECT status,quantity FROM resources WHERE name=$1', [name])).rows[0];
         assert.equal(resource.quantity, 20 * (attempt + 1));
         assert.equal(resource.status, allocated ? 'Available' : 'In stock');
@@ -285,6 +294,16 @@ test('PostgreSQL migration and task HTTP workflows preserve legacy data and atom
     assert.deepEqual(new Set((await request(`/tasks/${multi.id}`)).body.data.phases), new Set([...replaced, 'Structural']));
     await client.query('DELETE FROM tasks WHERE id=$1', [multi.id]);
     assert.equal((await client.query('SELECT COUNT(*)::int AS count FROM task_phases WHERE task_id=$1', [multi.id])).rows[0].count, 0);
+    response = await request('/tasks', 'POST', { ...baseBody, task_name: 'Independent work states',
+      subtasks: ['Default pending step', { title: 'Excavation', status: 'ongoing', progress: 60 }] });
+    assert.equal(response.status, 201, JSON.stringify(response.body));
+    assert.equal(response.body.data.status, 'pending');
+    assert.equal(response.body.data.progress, 0);
+    assert.deepEqual(response.body.data.subtasks.map(item => [item.status, item.progress]), [['pending', 0], ['ongoing', 60]]);
+    const savedChildren = (await client.query('SELECT subtasks FROM tasks WHERE id=$1', [response.body.data.id])).rows[0].subtasks;
+    assert.deepEqual(savedChildren.map(item => [item.status, item.progress]), [['pending', 0], ['ongoing', 60]]);
+    response = await request('/tasks', 'POST', { ...baseBody, subtasks: [{ title: 'Bad state', status: 'working123' }] });
+    assert.equal(response.status, 400);
   } finally {
     if (server) await new Promise(resolve => server.close(resolve));
     mock.restoreAll();

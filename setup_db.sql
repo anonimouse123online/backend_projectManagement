@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   assignee_id         UUID REFERENCES users(id) ON DELETE SET NULL,
   due_date            DATE,
   priority            VARCHAR(20) DEFAULT 'Medium',
-  status              VARCHAR(50) DEFAULT 'Pending',
+  status              VARCHAR(50) DEFAULT 'pending',
 
   materials_required  TEXT,
   site_instructions   TEXT,

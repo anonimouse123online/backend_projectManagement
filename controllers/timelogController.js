@@ -1,4 +1,5 @@
 const pool = require('../db');
+const timelogs = require('../services/timelogService');
 
 // ============================================================
 // GET /timelogs
@@ -178,11 +179,6 @@ exports.getTimelogs = async (req, res) => {
           ''
         ) AS additional_notes,
 
-        COALESCE(
-          tl.has_incident,
-          false
-        ) AS has_incident,
-
         tl.created_at,
         tl.updated_at
 
@@ -245,8 +241,7 @@ exports.getTimelogs = async (req, res) => {
           Subcontractors: log.sub_contractors,
           Hours: log.total_work_hours,
           Weather: log.weather,
-          Temperature: log.temperature,
-          Incident: log.has_incident ? 'YES' : 'NO'
+          Temperature: log.temperature
         }))
       );
     } else {
@@ -361,7 +356,7 @@ exports.createTimelog = async (req, res) => {
 
     console.log(
       JSON.stringify(
-        req.body,
+        timelogs.fieldsOf(req.body),
         null,
         2
       )
@@ -384,8 +379,7 @@ exports.createTimelog = async (req, res) => {
       work_completed,
       materials_delivered,
       equipment_used,
-      additional_notes,
-      has_incident
+      additional_notes
     } = req.body;
 
     // ========================================================
@@ -431,7 +425,6 @@ exports.createTimelog = async (req, res) => {
         materials_delivered,
         equipment_used,
         additional_notes,
-        has_incident,
         created_at,
         updated_at
       )
@@ -450,7 +443,6 @@ exports.createTimelog = async (req, res) => {
         $11,
         $12,
         $13,
-        $14,
         NOW(),
         NOW()
       )
@@ -475,7 +467,6 @@ exports.createTimelog = async (req, res) => {
         materials_delivered,
         equipment_used,
         additional_notes,
-        has_incident,
         created_at,
         updated_at
     `;
@@ -517,9 +508,7 @@ exports.createTimelog = async (req, res) => {
         '',
 
       additional_notes?.trim() ||
-        '',
-
-      has_incident ?? false
+        ''
     ];
 
     // ========================================================
@@ -538,7 +527,6 @@ exports.createTimelog = async (req, res) => {
     console.log('⏱️ Work Hours    :', values[6]);
     console.log('🌤️ Weather       :', values[7]);
     console.log('🌡️ Temperature   :', values[8]);
-    console.log('⚠️ Incident      :', values[13]);
 
     console.log('\n⏳ Inserting time log into PostgreSQL...');
 
@@ -598,11 +586,7 @@ exports.createTimelog = async (req, res) => {
         Subcontractors: createdLog.sub_contractors,
         Hours: createdLog.total_work_hours,
         Weather: createdLog.weather,
-        Temperature: createdLog.temperature,
-        Incident:
-          createdLog.has_incident
-            ? 'YES'
-            : 'NO'
+        Temperature: createdLog.temperature
       }
     ]);
 
@@ -689,4 +673,69 @@ exports.createTimelog = async (req, res) => {
       .status(500)
       .json(errorResponse);
   }
+};
+
+function timelogUser(req) {
+  const id = req.user?.id || req.user?.user_id || req.user?.userId;
+  if (!id) throw new timelogs.TimelogError(401, 'Unauthorized');
+  return id;
+}
+
+function timelogId(req) {
+  const id = req.params.id;
+  if (!/^[1-9]\d*$/.test(id || '') && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id || '')) {
+    throw new timelogs.TimelogError(400, 'Invalid Time Log ID.');
+  }
+  return id;
+}
+
+function timelogFailure(res, error) {
+  if (error instanceof timelogs.TimelogError) return res.status(error.status).json({ success: false, message: error.message });
+  if (['22P02', '22003', '22007', '22008', '22001', '23502', '23514'].includes(error.code)) {
+    return res.status(400).json({ success: false, message: 'Invalid Time Log fields.' });
+  }
+  console.error('Time Log error:', error);
+  return res.status(500).json({ success: false, message: 'Failed to process Time Log.' });
+}
+
+exports.getTimelogById = async (req, res) => {
+  try {
+    const userId = timelogUser(req);
+    const id = timelogId(req);
+    const { rows } = await pool.query(`SELECT ${timelogs.selectFields()} FROM time_logs tl
+      WHERE tl.id = $1 AND ${timelogs.projectScope('tl.project_name', 2)}`, [id, userId]);
+    if (!rows.length) throw new timelogs.TimelogError(404, 'Time Log not found.');
+    return res.status(200).json({ success: true, data: rows[0] });
+  } catch (error) { return timelogFailure(res, error); }
+};
+
+// PUT and PATCH both preserve any omitted work/time fields.
+exports.updateTimelog = async (req, res) => {
+  try {
+    const userId = timelogUser(req);
+    const id = timelogId(req);
+    const entries = Object.entries(timelogs.changesOf(req.body));
+    const values = entries.map(([, value]) => value);
+    const changes = entries.map(([field], index) => `${field} = $${index + 1}`);
+    values.push(id, userId);
+    const userParameter = values.length;
+    const projectIndex = entries.findIndex(([field]) => field === 'project_name');
+    const targetScope = projectIndex < 0 ? '' : ` AND ${timelogs.projectScope(`$${projectIndex + 1}`, userParameter)}`;
+    const { rows } = await pool.query(`UPDATE time_logs tl SET ${changes.join(', ')}, updated_at = NOW()
+      WHERE tl.id = $${values.length - 1} AND ${timelogs.projectScope('tl.project_name', userParameter)}${targetScope}
+      RETURNING ${timelogs.selectFields()}`, values);
+    if (!rows.length) throw new timelogs.TimelogError(404, 'Time Log not found.');
+    return res.status(200).json({ success: true, message: 'Time log updated successfully.', data: rows[0] });
+  } catch (error) { return timelogFailure(res, error); }
+};
+
+exports.deleteTimelog = async (req, res) => {
+  try {
+    const userId = timelogUser(req);
+    const id = timelogId(req);
+    const { rows } = await pool.query(`DELETE FROM time_logs tl
+      WHERE tl.id = $1 AND ${timelogs.projectScope('tl.project_name', 2)} RETURNING tl.id`, [id, userId]);
+    if (!rows.length) throw new timelogs.TimelogError(404, 'Time Log not found.');
+    return res.status(200).json({ success: true, message: 'Time log deleted successfully.', data: rows[0] });
+  } catch (error) { return timelogFailure(res, error); }
 };
