@@ -298,12 +298,17 @@ const updateProjectStatus = async (req, res) => {
 
     const allowed = [
       'Planning',
+      'Pending',
       'Ongoing',
       'Completed'
     ];
 
+    const cleanStatus = (status || '').trim();
+    const matchedStatus = allowed.find(
+      (a) => a.toLowerCase() === cleanStatus.toLowerCase()
+    );
 
-    if (!allowed.includes(status)) {
+    if (!matchedStatus) {
 
       return res.status(400).json({
         success: false,
@@ -332,7 +337,7 @@ const updateProjectStatus = async (req, res) => {
           status
         `,
         [
-          status,
+          matchedStatus,
           code,
           req.user.id
         ]
