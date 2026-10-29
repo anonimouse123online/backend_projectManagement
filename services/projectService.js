@@ -1,6 +1,7 @@
 const pool = require('../db');
+const access = require('./projectAccessService');
 const { projectBudgetColumns } = require('./moneyService');
-const { countColumns, countJoin, isAdmin } = require('./projectIssueService');
+const { countColumns, countJoin } = require('./projectIssueService');
 
 
 // ============================================================
@@ -21,8 +22,8 @@ const getAll = async (
   search,
   code,
   userId,
-  userEmail,
-  userRole
+  _userEmail,
+  _userRole
 ) => {
 
   if (!userId) {
@@ -34,9 +35,7 @@ const getAll = async (
   const conditions = [];
 
   const params = [
-    userId,
-    userEmail || null,
-    isAdmin({ role: userRole })
+    userId
   ];
 
 
@@ -46,33 +45,7 @@ const getAll = async (
   // Explicit casts prevent UUID/text type conflicts.
   // ============================================================
 
-  conditions.push(`
-    (
-      $3::boolean OR p.owner_id = $1::uuid
-
-      OR EXISTS (
-        SELECT 1
-
-        FROM project_members pm
-
-        WHERE pm.project_id = p.code
-
-          AND (
-            pm.user_id::text = $1::text
-
-            OR (
-              $2::text IS NOT NULL
-
-              AND LOWER(
-                TRIM(pm.user_name::text)
-              ) = LOWER(
-                TRIM($2::text)
-              )
-            )
-          )
-      )
-    )
-  `);
+  conditions.push(access.projectScope('p', 1));
 
 
   // ============================================================
@@ -259,7 +232,7 @@ const getAll = async (
 
     console.error(
       'USER EMAIL:',
-      userEmail
+      _userEmail
     );
 
     console.error(
@@ -294,8 +267,8 @@ const getAll = async (
 const getByCode = async (
   code,
   userId,
-  userEmail,
-  userRole
+  _userEmail,
+  _userRole
 ) => {
 
   if (!userId) {
@@ -375,65 +348,17 @@ const getByCode = async (
         ${countJoin}
 
 
-        WHERE p.code ILIKE $1
+        WHERE (lower(p.code) = lower($1) OR p.id::text = $1)
 
 
-          AND (
-
-            $4::boolean OR p.owner_id = $2::uuid
-
-
-            OR EXISTS (
-
-              SELECT 1
-
-              FROM project_members pm
-
-
-              WHERE pm.project_id = p.code
-
-
-                AND (
-
-                  pm.user_id::text =
-                    $2::text
-
-
-                  OR (
-
-                    $3::text IS NOT NULL
-
-
-                    AND LOWER(
-                      TRIM(
-                        pm.user_name::text
-                      )
-                    )
-
-                    =
-
-                    LOWER(
-                      TRIM(
-                        $3::text
-                      )
-                    )
-
-                  )
-
-                )
-
-            )
-
-          )
+          AND ${access.projectScope('p', 2)}
 
 
         LIMIT 1
         `,
         [
           code,
-          userId,
-          userEmail || null,
-          isAdmin({ role: userRole })
+          userId
         ]
       );
 
@@ -473,7 +398,7 @@ const getByCode = async (
 
     console.error(
       'USER EMAIL:',
-      userEmail
+      _userEmail
     );
 
     console.error(

@@ -12,7 +12,7 @@ test('authenticated budget APIs calculate decimal quantities, cent rounding and 
   const task = randomUUID();
   const ids = Object.fromEntries(['FLOAT', 'DECIMAL', 'SUM', 'OVER', 'EMPTY'].map(code => [code, randomUUID()]));
   // Read-only CTEs shadow real tables: no schema changes, migrations or fixture writes.
-  const fixtures = `WITH projects AS (
+  const fixtures = `WITH users AS (SELECT '${owner}'::uuid AS id, 'owner@test'::text AS email, 'admin'::text AS role, TRUE AS is_active), projects AS (
     SELECT v.id::uuid, v.code, v.code AS name, '${owner}'::uuid AS owner_id,
       v.budget::numeric(15,2), NULL::text AS location, NULL::text AS scope,
       NULL::text AS client, NULL::text AS phase, 'Ongoing'::text AS status,
@@ -29,7 +29,7 @@ test('authenticated budget APIs calculate decimal quantities, cent rounding and 
       ('OVER', '3', '0.50', NULL), ('PRIVATE', '100', '999', NULL)
     ) v(project, quantity, unit_price, task_id)
   ), tasks AS (
-    SELECT '${task}'::uuid AS id, '${ids.DECIMAL}'::uuid AS project_id, 'Pending'::text AS status
+    SELECT '${task}'::uuid AS id, '${ids.DECIMAL}'::uuid AS project_id, 'Pending'::text AS status, NULL::uuid AS assignee_id
   ), project_members AS (
     SELECT NULL::text AS project_id, NULL::uuid AS user_id, NULL::text AS user_name WHERE FALSE
   ), project_issues AS (
@@ -80,7 +80,7 @@ test('authenticated budget APIs calculate decimal quantities, cent rounding and 
       assert.equal(typeof stats.body.data.remainingBudget, 'number');
     }
     assert.equal((await request('/projects?status=Ongoing&code=FLOAT')).body.data.length, 1);
-    assert.equal((await request('/projects/FLOAT/stats', randomUUID())).status, 403);
+    assert.equal((await request('/projects/FLOAT/stats', randomUUID())).status, 401);
     assert.equal((await request('/projects/FLOAT/stats', null)).status, 401);
   } finally {
     if (server) await new Promise(resolve => { server.closeAllConnections(); server.close(resolve); });
@@ -118,7 +118,8 @@ test('task resource synchronization preserves fractional quantities and exact pr
           // Execute the controller's actual NUMERIC addition against a read-only fixture.
           return client.query(`WITH resources AS (
             SELECT 1 AS id, $4::numeric AS quantity, 10::numeric AS min_threshold,
-              $1::text AS name, $2::text AS project
+              $1::text AS name, $2::text AS project, NULL::uuid AS task_id
+          ), projects AS (SELECT $2::text AS code, 'Money project'::text AS name
           ) ${sql}`, [...values, existingQuantity]);
         }
         if (/INSERT INTO resources|UPDATE resources/.test(sql)) {

@@ -1,18 +1,19 @@
 const express = require('express');
 
 const router = express.Router();
+router.use(require('../middlewares/authMiddleware').verifyToken);
 
 const timelogController = require('../controllers/timelogController');
 
 // GET /timelogs
-router.get('/', timelogController.getTimelogs);
+router.get('/', require('../middlewares/relatedProjectAccess').timelog, timelogController.getTimelogs);
 
 // POST /timelogs
-router.post('/', timelogController.createTimelog);
+router.post('/', require('../middlewares/relatedProjectAccess').timelog, timelogController.createTimelog);
 
-router.get('/:id', timelogController.getTimelogById);
-router.patch('/:id', timelogController.updateTimelog);
-router.put('/:id', timelogController.updateTimelog);
-router.delete('/:id', timelogController.deleteTimelog);
+router.get('/:id', require('../middlewares/relatedProjectAccess').timelog, timelogController.getTimelogById);
+router.patch('/:id', require('../middlewares/relatedProjectAccess').timelog, timelogController.updateTimelog);
+router.put('/:id', require('../middlewares/relatedProjectAccess').timelog, timelogController.updateTimelog);
+router.delete('/:id', require('../middlewares/relatedProjectAccess').timelog, timelogController.deleteTimelog);
 
 module.exports = router;

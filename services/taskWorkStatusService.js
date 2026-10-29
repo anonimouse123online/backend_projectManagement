@@ -61,8 +61,15 @@ function subtaskFields(item) {
 
 function taskFields(task) {
   if (!task) return task;
+  const dateOnly = value => {
+    if (!(value instanceof Date) || !Number.isFinite(value.getTime())) return value;
+    const pad = part => String(part).padStart(2, '0');
+    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
+  };
   return {
     ...task,
+    ...(Object.hasOwn(task, 'start_date') ? { start_date: dateOnly(task.start_date) } : {}),
+    ...(Object.hasOwn(task, 'due_date') ? { due_date: dateOnly(task.due_date) } : {}),
     status: displayStatus(task.status),
     progress: task.progress_pct ?? task.progress ?? 0,
     subtasks: (Array.isArray(task.subtasks) ? task.subtasks : []).map(subtaskFields),

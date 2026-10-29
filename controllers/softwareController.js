@@ -2,7 +2,7 @@ const softwareService = require('../services/softwareService');
 
 exports.getAllSoftware = async (req, res) => {
   try {
-    const data = await softwareService.getAllSoftware();
+    const data = await softwareService.getAllSoftware(req.user);
     return res.json({ data });
   } catch (err) {
     console.error('GetAllSoftware error:', err.message);

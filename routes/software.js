@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+router.use(require('../middlewares/authMiddleware').verifyToken);
 const softwareService = require('../services/softwareService');
 const softwareController = require('../controllers/softwareController');
 
@@ -23,11 +24,11 @@ router.post('/sync', async (req, res) => {
 });
 
 // ─── CRUD ─────────────────────────────────────────────────
-router.get('/',                   softwareController.getAllSoftware);
-router.get('/project/:projectId', softwareController.getSoftwareByProject);
-router.get('/:id',                softwareController.getSoftwareById);
-router.post('/',                  softwareController.createSoftware);
-router.patch('/:id',              softwareController.updateSoftware);
-router.delete('/:id',             softwareController.deleteSoftware);
+router.get('/', require('../middlewares/relatedProjectAccess').software,                   softwareController.getAllSoftware);
+router.get('/project/:projectId', require('../middlewares/relatedProjectAccess').software, softwareController.getSoftwareByProject);
+router.get('/:id', require('../middlewares/relatedProjectAccess').software,                softwareController.getSoftwareById);
+router.post('/', require('../middlewares/relatedProjectAccess').software,                  softwareController.createSoftware);
+router.patch('/:id', require('../middlewares/relatedProjectAccess').software,              softwareController.updateSoftware);
+router.delete('/:id', require('../middlewares/relatedProjectAccess').software,             softwareController.deleteSoftware);
 
 module.exports = router;

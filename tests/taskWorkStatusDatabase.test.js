@@ -43,6 +43,10 @@ test('task and subtask work statuses persist independently of progress and prese
     ];
     await client.query(`INSERT INTO tasks (id,task_name,phase,project_id,assignee_id,status,progress_pct,subtasks)
       VALUES ($1,'Foundation','Structural',$2,$3,'Pending',45,$4)`, [task, project, engineer, JSON.stringify(originalSubtasks)]);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
+      ALTER TABLE project_members ADD COLUMN IF NOT EXISTS user_name TEXT;
+      CREATE TABLE IF NOT EXISTS tasks (id UUID PRIMARY KEY, project_id UUID, assignee_id UUID);
+      ALTER TABLE tasks ADD COLUMN IF NOT EXISTS assignee_id UUID;`);
     mock.method(pool, 'query', (...args) => client.query(...args));
     // Controller transactions run as savepoints inside the disposable outer transaction.
     mock.method(pool, 'connect', async () => ({
@@ -156,7 +160,7 @@ test('task and subtask work statuses persist independently of progress and prese
     });
     assert.equal(arrayStatus.status, 200, JSON.stringify(arrayStatus.body));
     assert.equal(arrayStatus.body.data.progress_pct, beforeArray.progress_pct);
-    assert.equal(arrayStatus.body.data.status, beforeArray.status);
+    assert.equal(arrayStatus.body.data.status, require('../services/taskWorkStatusService').displayStatus(beforeArray.status));
     await request(`/tasks/${task}/subtasks`, 'PATCH', { subtask_id: 'a', status: 'ongoing' });
     await request(`/tasks/${task}/subtasks`, 'PATCH', { subtask_id: 'b', status: 'pending' });
     let result = await request(`/tasks/${task}`);

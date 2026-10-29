@@ -166,6 +166,8 @@ app.use(
 app.use(
   '/uploads',
 
+  require('./middlewares/projectFileAccess'),
+
   express.static(
     path.join(
       __dirname,

@@ -1,3 +1,5 @@
+const { resourceProject } = require('./projectAccessService');
+
 class MoneyError extends Error {
   constructor(message) {
     super(message);
@@ -37,9 +39,7 @@ const quantityValue = (value, field) => decimalValue(value, field, { allowNegati
 const resourceCost = `ROUND(COALESCE((
   SELECT SUM(COALESCE(r.quantity, 0)::numeric * COALESCE(r.unit_price, 0)::numeric)
   FROM resources r
-  WHERE LOWER(TRIM(r.project)) = LOWER(TRIM(p.code))
-     OR LOWER(TRIM(r.project)) = LOWER(TRIM(p.name))
-     OR r.task_id IN (SELECT id FROM tasks WHERE project_id = p.id)
+  WHERE ${resourceProject('r', 'p')}
 ), 0), 2)`;
 
 const projectBudgetColumns = `ROUND(COALESCE(p.budget, 0)::numeric, 2) AS budget_allocated,

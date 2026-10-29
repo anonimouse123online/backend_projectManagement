@@ -1,4 +1,5 @@
 const pool = require('../db');
+const access = require('./projectAccessService');
 
 const softwareService = {
 
@@ -12,12 +13,13 @@ const softwareService = {
   },
 
   // ─── GET ALL ─────────────────────────────────────────────
-  async getAllSoftware() {
+  async getAllSoftware(user) {
     const result = await pool.query(
       `SELECT s.*, p.name AS project_name
        FROM software s
-       LEFT JOIN projects p ON s.project_id::text = p.id::text OR s.project_id = p.code
-       ORDER BY s.created_at DESC`
+       LEFT JOIN projects p ON s.project_id = p.id
+       WHERE ${access.projectScope('p', 1)}
+       ORDER BY s.created_at DESC`, [user.id]
     );
     return result.rows;
   },
@@ -27,7 +29,7 @@ const softwareService = {
     const result = await pool.query(
       `SELECT s.*, p.name AS project_name
        FROM software s
-       LEFT JOIN projects p ON s.project_id::text = p.id::text OR s.project_id = p.code
+       LEFT JOIN projects p ON s.project_id = p.id
        WHERE s.id = $1`,
       [id]
     );

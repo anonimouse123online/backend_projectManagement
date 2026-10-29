@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+router.use(require('../middlewares/authMiddleware').verifyToken);
 const dashboardController = require('../controllers/dashboardController');
 
 router.get('/stats',      dashboardController.getStats);

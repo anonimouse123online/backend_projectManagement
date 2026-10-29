@@ -1,6 +1,8 @@
 const express = require('express');
 
 const router = express.Router();
+const access = require('../middlewares/projectAccess');
+router.use(require('../middlewares/authMiddleware').verifyToken);
 
 const taskController =
   require('../controllers/taskController');
@@ -27,10 +29,16 @@ router.get(
 
 router.post(
   '/',
+  access.createTask,
   taskController.createTask
 );
 
 // No generic edit route existed; use the existing task resource URL.
+router.use('/:id', (req, res, next) => {
+  if (req.params.id === 'users') return next();
+  const manage = req.method !== 'GET' && (req.path === '/' || req.path === '/assign');
+  return access.task(manage ? 'manage' : req.method === 'GET' ? 'read' : 'work')(req, res, next);
+});
 router.patch('/:id', taskController.updateTask);
 router.put('/:id', taskController.updateTask);
 

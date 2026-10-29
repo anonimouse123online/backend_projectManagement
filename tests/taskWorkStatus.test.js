@@ -1,5 +1,12 @@
 const { test, mock } = require('node:test');
 const assert = require('node:assert/strict');
+const workStatuses = require('../services/taskWorkStatusService');
+
+test('task serialization keeps PostgreSQL DATE values on their original calendar day', () => {
+  const serialized = workStatuses.taskFields({ start_date: new Date(2099, 11, 30), due_date: new Date(2099, 11, 31) });
+  assert.equal(serialized.start_date, '2099-12-30');
+  assert.equal(serialized.due_date, '2099-12-31');
+});
 const pool = require('../db');
 const service = require('../services/taskWorkStatusService');
 const controller = require('../controllers/taskController');

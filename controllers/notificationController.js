@@ -1,5 +1,5 @@
+const access = require('../services/projectAccessService');
 const pool = require('../db');
-const messaging = require('../configuration/firebaseAdmin');
 
 // ============================================================
 // GET NOTIFICATIONS
@@ -18,8 +18,6 @@ const messaging = require('../configuration/firebaseAdmin');
 exports.getNotifications = async (req, res) => {
   try {
     const userId = req.user?.id || req.user?.userId;
-    const role = (req.user?.role || '').toLowerCase();
-
     let query;
     let values = [];
 
@@ -44,45 +42,13 @@ exports.getNotifications = async (req, res) => {
       LEFT JOIN users target_u ON target_u.id = n.target_user_id
     `;
 
-    if (!userId) {
-      // Unauthenticated fallback
-      query = `
-        ${baseSelect}
-        WHERE n.audience = 'all'
-        ORDER BY n.created_at DESC
-      `;
-    } else if (role === 'admin') {
-      // Admins see all notifications with complete isolation metadata
-      query = `
-        ${baseSelect}
-        ORDER BY n.created_at DESC
-      `;
-    } else {
-      // Isolated notifications for the logged-in user
-      const isEngineer = role.includes('engineer');
-      query = `
-        ${baseSelect}
-        WHERE
-          n.created_by = $1
-          OR n.target_user_id = $1
-          OR n.audience = 'all'
-          OR (n.audience = 'engineer' AND $2 = true)
-          OR (
-            n.audience = 'project'
-            AND (
-              n.project_id IN (
-                SELECT project_id FROM project_members WHERE user_id = $1
-              )
-              OR n.project_id IN (
-                SELECT code FROM projects WHERE owner_id = $1
-              )
-            )
-          )
-        ORDER BY n.created_at DESC
-      `;
-      values = [userId, isEngineer];
-    }
-
+    if (!userId) return res.status(401).json({ error: 'Authentication required.' });
+    query = `${baseSelect} WHERE
+      (n.project_id IS NOT NULL AND ${access.projectScope('p', 1)}
+        AND (n.audience != 'individual' OR n.target_user_id = $1 OR n.created_by = $1))
+      OR (n.project_id IS NULL AND (n.created_by = $1 OR n.target_user_id = $1))
+      ORDER BY n.created_at DESC`;
+    values = [userId];
     const result = await pool.query(query, values);
 
     return res.status(200).json({
@@ -188,6 +154,18 @@ exports.createNotification = async (req, res) => {
     const cleanProjectId = projectId ? projectId.trim() : null;
     const cleanTargetUserId = targetUserId ? targetUserId.trim() : null;
 
+    if (['all', 'engineer'].includes(selectedAudience)) {
+      return res.status(403).json({ error: 'Select a project or an authorized recipient.' });
+    }
+    if (cleanProjectId) {
+      await access.getProject(cleanProjectId, req.user);
+    }
+    if (cleanTargetUserId) {
+      const { rows } = await pool.query(`SELECT 1 FROM projects p WHERE ${access.projectScope('p', 1)}
+        AND ${access.projectScope('p', 2)} AND ($3::text IS NULL OR p.code = $3) LIMIT 1`,
+        [userId, cleanTargetUserId, cleanProjectId]);
+      if (!rows.length) return res.status(403).json({ error: 'Recipient must share an authorized project.' });
+    }
     // Retrieve project name if specified
     let projectName = null;
     if (cleanProjectId) {
@@ -260,81 +238,19 @@ exports.createNotification = async (req, res) => {
       sender_name: senderName
     };
 
-    // ========================================================
-    // DISPATCH PUSH NOTIFICATIONS (FCM)
-    // ========================================================
-    try {
-      const displayTitle = (selectedAudience === 'project' || selectedAudience === 'individual') && projectName
-        ? `[${projectName}] ${notification.title}`
-        : notification.title;
-
-      const fcmBasePayload = {
-        notification: {
-          title: displayTitle,
-          body: notification.message
-        },
-        data: {
-          title: displayTitle,
-          message: notification.message,
-          notificationId: String(notification.id),
-          audience: notification.audience,
-          projectId: cleanProjectId || '',
-          targetUserId: cleanTargetUserId || '',
-          type: 'admin_notification'
-        },
-        android: {
-          priority: 'high',
-          notification: {
-            channelId: 'sitepulse_notifications',
-            icon: 'ic_notification',
-            color: '#2563EB',
-            sound: 'default',
-            priority: 'high',
-            defaultSound: true,
-            defaultVibrateTimings: true
-          }
-        }
-      };
-
-      if (selectedAudience === 'all') {
-        messaging.send({ ...fcmBasePayload, topic: 'all_users' }).catch(() => {});
-      } else if (selectedAudience === 'engineer') {
-        messaging.send({ ...fcmBasePayload, topic: 'engineers' }).catch(() => {});
-      } else if (selectedAudience === 'project' && cleanProjectId) {
-        // Send to project topic
-        const sanitizedTopic = 'proj_' + cleanProjectId.replace(/[^a-zA-Z0-9_-]/g, '_');
-        messaging.send({ ...fcmBasePayload, topic: sanitizedTopic }).catch(() => {});
-
-        // Also push directly to each project member's personal topic
-        const members = await pool.query(
-          'SELECT user_id FROM project_members WHERE project_id = $1',
-          [cleanProjectId]
-        );
-        for (const m of members.rows) {
-          if (m.user_id !== userId) {
-            messaging.send({ ...fcmBasePayload, topic: `user_${m.user_id}` }).catch(() => {});
-          }
-        }
-      } else if (selectedAudience === 'individual' && cleanTargetUserId) {
-        // Push exclusively to the targeted person
-        messaging.send({ ...fcmBasePayload, topic: `user_${cleanTargetUserId}` }).catch(() => {});
-      }
-    } catch (fcmErr) {
-      console.warn('FCM dispatch warning:', fcmErr.message);
-    }
-
+    // Project data is delivered through authenticated socket rooms and the API.
+    // FCM topic subscriptions do not prove authorization; never publish it there.
     // ========================================================
     // REALTIME SOCKET.IO
     // ========================================================
     const io = req.app.get('io');
     if (io) {
-      if (selectedAudience === 'project' && cleanProjectId) {
-        io.to(`project:${cleanProjectId}`).emit('new_notification', enrichedNotification);
-      } else if (selectedAudience === 'individual' && cleanTargetUserId) {
-        io.to(`user:${cleanTargetUserId}`).emit('new_notification', enrichedNotification);
-      } else {
-        io.emit('new_notification', enrichedNotification);
-      }
+      const recipients = cleanProjectId ? (await pool.query(`SELECT u.id FROM users u
+        JOIN projects p ON p.code = $1 WHERE u.is_active = TRUE AND
+        (u.id = p.owner_id OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.code AND pm.user_id = u.id))`,
+        [cleanProjectId])).rows.map(row => row.id) : [];
+      const ids = selectedAudience === 'individual' ? [cleanTargetUserId] : recipients;
+      if (ids.length) io.to(ids.map(id => `user:${id}`)).emit('new_notification', enrichedNotification);
     }
 
     return res.status(201).json({
@@ -344,6 +260,7 @@ exports.createNotification = async (req, res) => {
     });
 
   } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
     console.error('Create notification error:', error);
 
     return res.status(500).json({

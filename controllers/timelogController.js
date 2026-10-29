@@ -94,7 +94,7 @@ exports.getTimelogs = async (req, res) => {
     // ========================================================
 
     // Always filter by accessible projects
-    let whereClause = `WHERE tl.project_name IN (SELECT project_name FROM my_projects)`;
+    let whereClause = `WHERE ${timelogs.projectScope('tl.project_name', 1)}`;
 
     if (conditions.length > 0) {
       whereClause += ` AND ${conditions.join(' AND ')}`;

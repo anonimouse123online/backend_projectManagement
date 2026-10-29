@@ -52,7 +52,7 @@ test('PostgreSQL issue migration, aggregate counts, authorized HTTP routes, noti
       await client.query("INSERT INTO projects (id,code,name,owner_id,status) VALUES ($1,$2,'Test Project',$3,'Completed')",
         [project.id, project.code, project === second ? users.outsider.id : users.owner.id]);
     }
-    for (const user of [users.engineer, users.manager, users.supervisor, users.viewer]) {
+    for (const user of [users.engineer, users.manager, users.supervisor, users.viewer, users.admin]) {
       await client.query('INSERT INTO project_members VALUES ($1,$2,$3,$4)', [first.code, user.id, user.email, user.role]);
     }
     // Duplicate membership must never multiply counts.
@@ -64,6 +64,7 @@ test('PostgreSQL issue migration, aggregate counts, authorized HTTP routes, noti
     const sql = fs.readFileSync(path.join(__dirname, '../migrations/project_issue_alerts.sql'), 'utf8');
     await client.query(sql);
     await client.query(sql);
+    await client.query(fs.readFileSync(path.join(__dirname, '../migrations/issue_images.sql'), 'utf8'));
     const migrated = (await client.query('SELECT * FROM project_issues ORDER BY severity')).rows;
     assert.equal(migrated.length, 3);
     assert.ok(migrated.every(issue => issue.project_id === first.id));
@@ -117,6 +118,10 @@ test('PostgreSQL issue migration, aggregate counts, authorized HTTP routes, noti
       if (failStatusUpdate && /UPDATE project_issues SET/.test(sql)) { failStatusUpdate = false; throw new Error('Injected status failure'); }
       return client.query(sql, values);
     };
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
+      ALTER TABLE project_members ADD COLUMN IF NOT EXISTS user_name TEXT;
+      CREATE TABLE IF NOT EXISTS tasks (id UUID PRIMARY KEY, project_id UUID, assignee_id UUID);
+      ALTER TABLE tasks ADD COLUMN IF NOT EXISTS assignee_id UUID;`);
     mock.method(pool, 'query', query);
     mock.method(pool, 'connect', async () => ({
       query: (sql, values) => query(sql === 'BEGIN' ? 'SAVEPOINT issue_request' :
@@ -148,7 +153,7 @@ test('PostgreSQL issue migration, aggregate counts, authorized HTTP routes, noti
     const invalidToken = await fetch(root + base, { headers: {
       Authorization: `Bearer ${jwt.sign(users.engineer, randomUUID())}`,
     } });
-    assert.equal(invalidToken.status, 403);
+    assert.equal(invalidToken.status, 401);
     assert.equal((await invalidToken.json()).error, 'Invalid token.');
     // Owners/admins need no membership; assigned roles and viewers read through membership.
     for (const url of [base, `/projects/${first.code}/issues`, `/issues/${migrated[0].id}`]) {
@@ -159,9 +164,9 @@ test('PostgreSQL issue migration, aggregate counts, authorized HTTP routes, noti
       }
     }
     for (const url of [base, `/projects/${first.code}/issues`, `/issues/${migrated[0].id}`]) {
-      assert.equal((await request(url, users.outsider)).status, 403);
+      assert.equal((await request(url, users.outsider)).status, 404);
     }
-    assert.equal((await request(`/projects/${second.id}/issues`, users.manager)).status, 403);
+    assert.equal((await request(`/projects/${second.id}/issues`, users.manager)).status, 404);
     assert.equal((await request(`/projects/${randomUUID()}/issues`)).status, 404);
     assert.equal((await request(`/issues/${randomUUID()}`)).status, 404);
     assert.equal((await request('/issues/bad-id')).status, 400);
@@ -172,7 +177,7 @@ test('PostgreSQL issue migration, aggregate counts, authorized HTTP routes, noti
     assert.equal(listing.body.data.find(p => p.id === empty.id).active_issue_count, 0);
     assert.equal(listing.body.data.find(p => p.id === empty.id).has_active_issues, false);
     assert.equal(listing.body.data.some(p => p.id === second.id), false);
-    assert.equal((await request('/projects', users.admin)).body.data.length, 3);
+    assert.equal((await request('/projects', users.admin)).body.data.length, 1);
     assert.equal((await request('/projects?status=Completed&search=Test&code=PRJ-TEST-001', users.owner)).body.data.length, 1);
     assert.equal((await request('/projects/joined')).body.data[0].active_issue_count, 2);
     assert.equal((await request(`/projects/${first.code}`)).body.data.active_issue_count, 2);
@@ -202,14 +207,14 @@ test('PostgreSQL issue migration, aggregate counts, authorized HTTP routes, noti
         assert.equal(blocked.status, 400);
         assert.equal(blocked.body.message,
           'Cannot report issues because the project is in planning and not yet activated.');
-        assert.equal((await request(url, users.outsider, 'POST', body)).status, 403);
+        assert.equal((await request(url, users.outsider, 'POST', body)).status, 404);
         assert.equal((await request(url, users.viewer, 'POST', body)).status, 403);
       }
     }
     await client.query("UPDATE projects SET status='Completed' WHERE id=$1", [first.id]);
     assert.equal((await client.query('SELECT COUNT(*)::int AS count FROM notifications')).rows[0].count, 0);
     assert.equal((await service.getCounts(first.id, client)).active_issue_count, 2);
-    assert.equal((await request(base, users.outsider, 'POST', body)).status, 403);
+    assert.equal((await request(base, users.outsider, 'POST', body)).status, 404);
     assert.equal((await request(base, users.viewer, 'POST', body)).status, 403);
     assert.equal((await request(base, users.engineer, 'POST', { ...body, assigned_to: users.outsider.id })).status, 400);
     assert.equal((await request(base, users.engineer, 'POST', { ...body, project_id: second.id })).status, 400);
@@ -247,13 +252,13 @@ test('PostgreSQL issue migration, aggregate counts, authorized HTTP routes, noti
     assert.equal((await request(issueUrl, users.supervisor, 'PATCH', {
       resolution_notes: 'Reviewed by the assigned supervisor',
     })).status, 200);
-    assert.equal((await request(issueUrl, users.outsider, 'PATCH', { ...feedback, status: 'resolved' })).status, 403);
+    assert.equal((await request(issueUrl, users.outsider, 'PATCH', { ...feedback, status: 'resolved' })).status, 404);
     assert.equal((await request(`/projects/${second.id}/issues/${created.id}`, users.admin, 'PATCH', { ...feedback, status: 'resolved' })).status, 404);
     assert.equal((await request(`${issueUrl}/resolve`, null, 'PATCH', feedback)).status, 401);
     assert.equal((await request('/issues/bad-id/resolve', users.admin, 'PATCH', feedback)).status, 400);
     assert.equal((await request(`/issues/${randomUUID()}/resolve`, users.admin, 'PATCH', feedback)).status, 404);
     for (const user of [users.engineer, users.supervisor, users.viewer, users.outsider]) {
-      assert.equal((await request(`${issueUrl}/resolve`, user, 'PATCH', feedback)).status, 403);
+      assert.equal((await request(`${issueUrl}/resolve`, user, 'PATCH', feedback)).status, user === users.outsider ? 404 : 403);
     }
     // An old privileged JWT cannot override the user's current database role or disabled account.
     await client.query("UPDATE users SET role='Member' WHERE id=$1", [users.manager.id]);
@@ -333,9 +338,12 @@ test('PostgreSQL issue migration, aggregate counts, authorized HTTP routes, noti
     assert.equal((await client.query('SELECT COUNT(*)::int AS count FROM notifications')).rows[0].count, 5);
     // Membership revocation takes effect for both HTTP reads and socket recipients.
     await client.query('DELETE FROM project_members WHERE user_id=$1', [users.engineer.id]);
-    assert.equal((await request(base)).status, 403);
+    assert.equal((await request(base)).status, 404);
+    const beforeRevocationNotification = emissions.length;
     assert.equal((await request(`/projects/${first.code}/issues/${legacy.body.data.id}/resolve`, users.owner, 'PATCH', feedback)).status, 200);
     assert.ok(!emissions.findLast(e => e.event === 'project_issues_updated').rooms.includes(`user:${users.engineer.id}`));
+    assert.ok(emissions.slice(beforeRevocationNotification).every(event => !event.rooms.includes(`user:${users.engineer.id}`)),
+      'Removed reporters must receive neither counts nor private resolution notifications');
   } finally {
     if (server) await new Promise(resolve => server.close(resolve));
     mock.restoreAll();
@@ -372,6 +380,8 @@ test('concurrent resolution requests save one resolution and return one conflict
     await setup.query("INSERT INTO project_issues (id,project_id,title,status,reported_by) VALUES ($1,$2,'Race issue','open',$3)", [issueId, projectId, reporterId]);
     racers.push(await pool.connect(), await pool.connect());
     for (const racer of racers) await racer.query(`SET search_path TO "${schema}", public`);
+    await setup.query('CREATE TABLE tasks (id UUID PRIMARY KEY, project_id UUID, assignee_id UUID)');
+    mock.method(pool, 'query', (sql, values) => setup.query(sql, values));
     const available = [...racers];
     let arrivals = 0;
     const barrier = new Promise(resolve => { releaseBarrier = resolve; });

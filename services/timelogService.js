@@ -1,3 +1,4 @@
+const access = require('./projectAccessService');
 const FIELDS = [
   'project_name', 'engineer_name', 'date', 'work_on_site', 'supervisors',
   'sub_contractors', 'total_work_hours', 'weather', 'temperature', 'work_completed',
@@ -51,9 +52,7 @@ function changesOf(body = {}) {
 
 // Matches GET /timelogs: access through project ownership or membership.
 function projectScope(projectName, userParameter) {
-  return `EXISTS (SELECT 1 FROM projects p WHERE p.name = ${projectName} AND
-    (p.owner_id = $${userParameter}::uuid OR EXISTS (SELECT 1 FROM project_members pm
-      WHERE pm.project_id = p.code AND pm.user_id = $${userParameter}::uuid)))`;
+  return `EXISTS (SELECT 1 FROM projects p WHERE ${access.uniqueProjectName(projectName)} AND ${access.projectScope('p', userParameter)})`;
 }
 
 function selectFields(alias = 'tl') {

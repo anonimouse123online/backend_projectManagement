@@ -1,4 +1,5 @@
 const pool = require('../db');
+const access = require('./projectAccessService');
 
 const STATUSES = ['open', 'in_progress', 'resolved'];
 const SEVERITIES = ['low', 'medium', 'high', 'critical'];
@@ -21,30 +22,16 @@ class IssueError extends Error {
 }
 
 async function getProject(reference, user, db = pool) {
-  if (!user?.id) throw new IssueError(401, 'Authentication required.');
-  if (typeof reference !== 'string' || !reference.trim() || reference.length > 50) {
-    throw new IssueError(400, 'A valid project ID or code is required.');
+  try { return await access.getProject(reference, user, db); }
+  catch (error) {
+    if (error instanceof access.AccessError) throw new IssueError(error.status, error.message);
+    throw error;
   }
-  const { rows } = await db.query(`
-    SELECT p.id, p.code, p.name, p.status, p.owner_id,
-      EXISTS (
-        SELECT 1 FROM project_members pm WHERE pm.project_id = p.code
-        AND (pm.user_id = $2::uuid OR ($3::text IS NOT NULL
-          AND lower(trim(pm.user_name)) = lower(trim($3::text))))
-      ) AS is_member
-    FROM projects p WHERE p.id::text = $1 OR p.code = $1 LIMIT 1
-  `, [reference.trim(), user.id, user.email || null]);
-  const project = rows[0];
-  if (!project) throw new IssueError(404, 'Project not found.');
-  if (!isAdmin(user) && project.owner_id !== user.id && !project.is_member) {
-    throw new IssueError(403, 'You do not have access to this project.');
-  }
-  return project;
 }
 
 function requireWrite(project, user) {
   const role = roleOf(user);
-  if (isAdmin(user) || project.owner_id === user.id || (project.is_member &&
+  if ((isAdmin(user) && project.is_member) || project.owner_id === user.id || ((project.is_member || project.is_assigned) &&
     (role === 'project_manager' || role === 'supervisor' || role.includes('engineer')))) return;
   throw new IssueError(403, 'Only project managers and assigned engineers or supervisors can submit or update issues.');
 }
@@ -65,7 +52,7 @@ async function getResolver(id, db = pool) {
 }
 
 function requireResolve(project, user) {
-  if (isAdmin(user) || (roleOf(user) === 'project_manager' &&
+  if ((isAdmin(user) && (project.owner_id === user.id || project.is_member)) || (roleOf(user) === 'project_manager' &&
     (project.owner_id === user.id || project.is_member))) return;
   throw new IssueError(403, 'Only admins and project managers with project access can resolve issues.');
 }
@@ -87,25 +74,48 @@ function initializeIssueSocket(io) {
   namespace.on('connection', socket => socket.join(`user:${socket.data.user.id}`));
 }
 
+async function authorizedRecipients(project) {
+  const { rows } = await pool.query(`SELECT DISTINCT u.id FROM projects p
+    JOIN users u ON u.is_active = TRUE
+    WHERE ${project.id ? 'p.id = $1::uuid' : 'p.code = $1'} AND (u.id = p.owner_id OR EXISTS (
+      SELECT 1 FROM project_members pm WHERE pm.project_id = p.code
+      AND (pm.user_id = u.id OR (pm.user_id IS NULL AND to_jsonb(u)->>'email_verified' = 'true' AND lower(trim(pm.user_name)) = lower(trim(u.email))))
+    ) OR EXISTS (SELECT 1 FROM tasks assigned_task WHERE assigned_task.project_id = p.id
+      AND assigned_task.assignee_id = u.id))`, [project.id || project.code]);
+  return new Set(rows.map(user => user.id));
+}
+
+async function revokeProjectAccess(io, project) {
+  if (!io) return;
+  const authorized = await authorizedRecipients(project);
+  const rooms = [...new Set([project.code, project.id].filter(Boolean).map(id => `project:${id}`))];
+  for (const name of ['/', '/project-issues']) {
+    const sockets = await io.of(name).in(rooms).fetchSockets();
+    for (const socket of sockets) {
+      if (!authorized.has(socket.data.user?.id)) {
+        for (const room of rooms) await socket.leave(room);
+      }
+    }
+  }
+}
+
 async function publishChange(req, project, counts, notification) {
   const io = req.app.get('io');
   if (!io) return;
-  // Recompute recipients for every change so removed members receive no new data.
-  const { rows } = await pool.query(`SELECT DISTINCT u.id FROM users u
-    WHERE lower(trim(u.role)) = 'admin' OR u.id = $1::uuid OR EXISTS (
-      SELECT 1 FROM project_members pm WHERE pm.project_id = $2
-      AND (pm.user_id = u.id OR lower(trim(pm.user_name)) = lower(trim(u.email)))
-    )`, [project.owner_id, project.code]);
+  // Validate every recipient against current ownership, membership and assignment.
+  const authorized = await authorizedRecipients(project);
   const namespace = io.of('/project-issues');
-  const rooms = rows.map(user => `user:${user.id}`);
+  const rooms = [...authorized].map(id => `user:${id}`);
   if (rooms.length) namespace.to(rooms).emit('project_issues_updated', { project_id: project.id, project_code: project.code, ...counts });
   for (const item of Array.isArray(notification) ? notification : notification ? [notification] : []) {
-    const notificationRooms = item.audience === 'individual' ? [`user:${item.target_user_id}`] : rooms;
+    const notificationRooms = item.audience === 'individual'
+      ? authorized.has(item.target_user_id) ? [`user:${item.target_user_id}`] : []
+      : rooms;
     if (notificationRooms.length) namespace.to(notificationRooms).emit('new_notification', { ...item, project_name: project.name });
   }
 }
 
 module.exports = {
   STATUSES, SEVERITIES, UUID, normalize, isAdmin, countColumns, countJoin,
-  IssueError, getProject, requireWrite, requireResolve, getResolver, getCounts, initializeIssueSocket, publishChange,
+  IssueError, getProject, requireWrite, requireResolve, getResolver, getCounts, initializeIssueSocket, publishChange, revokeProjectAccess,
 };

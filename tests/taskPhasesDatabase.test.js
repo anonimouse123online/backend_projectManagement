@@ -17,7 +17,8 @@ test('PostgreSQL migration and task HTTP workflows preserve legacy data and atom
     await client.query(`SET LOCAL search_path TO "${schema}", public`);
     await client.query(`CREATE TABLE users (id UUID PRIMARY KEY, full_name TEXT, email TEXT, role TEXT, is_active BOOLEAN DEFAULT TRUE);
       CREATE TABLE projects (id UUID PRIMARY KEY, code VARCHAR(50), name TEXT, owner_id UUID REFERENCES users(id),
-        location TEXT, client TEXT, budget NUMERIC, phase TEXT, scope TEXT, status TEXT, progress INTEGER DEFAULT 0,
+        location TEXT, client TEXT, budget NUMERIC, phase TEXT, scope TEXT,
+        status TEXT CHECK (status IN ('Planning','Ongoing','Completed')), progress INTEGER DEFAULT 0,
         progress_pct INTEGER DEFAULT 0, start_date DATE, end_date DATE, updated_at TIMESTAMPTZ DEFAULT NOW());
       CREATE TABLE project_members (id SERIAL PRIMARY KEY, project_id VARCHAR(50), user_id UUID REFERENCES users(id), user_name TEXT);
       CREATE TABLE tasks (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), task_name VARCHAR(255) NOT NULL,
@@ -28,7 +29,7 @@ test('PostgreSQL migration and task HTTP workflows preserve legacy data and atom
         status VARCHAR(50) NOT NULL DEFAULT 'Pending', subtasks JSONB NOT NULL DEFAULT '[]'::jsonb,
         progress_pct INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());
       CREATE TABLE resources (id SERIAL PRIMARY KEY, name TEXT, supplier TEXT, category TEXT, quantity INTEGER,
-        unit TEXT, min_threshold INTEGER, unit_price NUMERIC, project TEXT, status TEXT,
+        unit TEXT, min_threshold INTEGER, unit_price NUMERIC, project TEXT, task_id UUID, task_name TEXT, status TEXT,
         created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW());
       CREATE TABLE reports (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), task_id UUID REFERENCES tasks(id) ON DELETE CASCADE, report_date DATE,
         report_text TEXT, observations JSONB, status TEXT, created_at TIMESTAMPTZ DEFAULT NOW());
@@ -46,7 +47,7 @@ test('PostgreSQL migration and task HTTP workflows preserve legacy data and atom
     const projectId = randomUUID();
     const code = 'TASK-PHASE-TEST';
     await client.query(`INSERT INTO projects (id,code,name,owner_id,start_date,end_date,status)
-      VALUES ($1,$2,'Test Phase Project',$3,'2000-01-01','2100-12-31','Pending')`, [projectId, code, users.owner.id]);
+      VALUES ($1,$2,'Test Phase Project',$3,'2000-01-01','2100-12-31','Ongoing')`, [projectId, code, users.owner.id]);
     await client.query('INSERT INTO project_members (project_id,user_id,user_name) VALUES ($1,$2,$3)', [code, users.engineer.id, users.engineer.email]);
     const legacy = ['Phase 1 - Foundation', 'Phase 2 - Structural', 'Phase 3 - Electrical & Utilities', 'Phase 4 - Plumbing & MEP', 'Phase 5 - Finishing'];
     const mapped = ['Site Development', 'Structural', 'Electrical & Utilities', 'Plumbing & MEP', 'Architectural'];
@@ -132,10 +133,69 @@ test('PostgreSQL migration and task HTTP workflows preserve legacy data and atom
       assignee_id: users.engineer.id, due_date: '2099-01-01', priority: 'Medium',
       materials_required: '2 bags Cement', site_instructions: 'Inspect the perimeter',
       subtasks: ['Inspect', { title: 'Prepare', completed: true }] };
+    let response;
     assert.equal((await request('/tasks', 'POST', baseBody, null)).status, 401);
-    assert.equal((await request('/tasks', 'POST', baseBody, users.outsider)).status, 403);
+    assert.equal((await request('/tasks', 'POST', baseBody, users.outsider)).status, 404);
     assert.equal((await request('/tasks', 'POST', { ...baseBody, assignee_id: users.outsider.id })).status, 400);
-    let response = await request('/tasks', 'POST', baseBody);
+
+    // A zero-progress task preserves the valid status of an Ongoing project.
+    response = await request('/tasks', 'POST', { ...baseBody, task_name: 'Zero progress on active project', subtasks: [], materials_required: 'None specified' });
+    assert.equal(response.status, 201, JSON.stringify(response.body));
+    const zeroOngoingTask = response.body.data;
+    assert.equal(zeroOngoingTask.progress_pct, 0);
+    assert.equal((await client.query('SELECT status,progress_pct FROM projects WHERE id=$1', [projectId])).rows[0].status, 'Ongoing');
+    const listedTasks = await request('/tasks');
+    assert.equal(listedTasks.status, 200, JSON.stringify(listedTasks.body));
+    assert.ok(listedTasks.body.data.some(task => task.id === zeroOngoingTask.id));
+
+    // A Planning project stays Planning at zero.
+    const planningProjectId = randomUUID();
+    const planningCode = 'TASK-PLANNING-TEST';
+    await client.query(`INSERT INTO projects (id,code,name,owner_id,start_date,end_date,status)
+      VALUES ($1,$2,'Planning Project',$3,'2000-01-01','2100-12-31','Planning')`, [planningProjectId, planningCode, users.owner.id]);
+    await client.query('INSERT INTO project_members (project_id,user_id,user_name) VALUES ($1,$2,$3)', [planningCode, users.engineer.id, users.engineer.email]);
+    const planningTaskResponse = await request('/tasks', 'POST', {
+      ...baseBody, task_name: 'Progress transition task', project_id: planningProjectId,
+      subtasks: [{ title: 'First', completed: false }, { title: 'Second', completed: false }],
+      materials_required: 'None specified',
+    });
+    assert.equal(planningTaskResponse.status, 201, JSON.stringify(planningTaskResponse.body));
+    const progressTask = planningTaskResponse.body.data;
+    assert.equal(progressTask.progress_pct, 0);
+    assert.equal((await client.query('SELECT status FROM projects WHERE id=$1', [planningProjectId])).rows[0].status, 'Planning');
+
+    // Updating task progress on an active project advances it at 50% and completion.
+    const progressProjectId = randomUUID();
+    const progressCode = 'TASK-PROGRESS-TEST';
+    await client.query(`INSERT INTO projects (id,code,name,owner_id,start_date,end_date,status)
+      VALUES ($1,$2,'Progress Project',$3,'2000-01-01','2100-12-31','Ongoing')`, [progressProjectId, progressCode, users.owner.id]);
+    await client.query('INSERT INTO project_members (project_id,user_id,user_name) VALUES ($1,$2,$3)', [progressCode, users.engineer.id, users.engineer.email]);
+    const transitionTaskResponse = await request('/tasks', 'POST', {
+      ...baseBody, task_name: 'Progress transition task', project_id: progressProjectId,
+      subtasks: [{ title: 'First', completed: false }, { title: 'Second', completed: false }],
+      materials_required: 'None specified',
+    });
+    assert.equal(transitionTaskResponse.status, 201, JSON.stringify(transitionTaskResponse.body));
+    const transitionTask = transitionTaskResponse.body.data;
+    assert.equal(transitionTask.progress_pct, 0);
+    response = await request(`/tasks/${progressTask.id}/subtasks`, 'PATCH', {
+      subtasks: [{ title: 'First', completed: true }, { title: 'Second', completed: false }],
+    });
+    assert.equal(response.status, 400); // Planning projects require activation before task work changes.
+    response = await request(`/tasks/${transitionTask.id}/subtasks`, 'PATCH', {
+      subtasks: [{ title: 'First', completed: true }, { title: 'Second', completed: false }],
+    });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    const halfProgressProject = (await client.query('SELECT status,progress_pct FROM projects WHERE id=$1', [progressProjectId])).rows[0];
+    assert.equal(halfProgressProject.progress_pct, 50);
+    assert.equal(halfProgressProject.status, 'Ongoing');
+    response = await request(`/tasks/${transitionTask.id}/complete`, 'PATCH', {});
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    const completedProject = (await client.query('SELECT status,progress_pct FROM projects WHERE id=$1', [progressProjectId])).rows[0];
+    assert.equal(completedProject.progress_pct, 100);
+    assert.equal(completedProject.status, 'Completed');
+
+    response = await request('/tasks', 'POST', baseBody);
     assert.equal(response.status, 201, JSON.stringify(response.body));
     const single = response.body.data;
     assert.deepEqual(single.phases, ['Site Development']);
@@ -143,6 +203,9 @@ test('PostgreSQL migration and task HTTP workflows preserve legacy data and atom
     assert.equal(single.status, 'ongoing');
     assert.equal(single.progress_pct, 50);
     assert.equal(single.subtasks.length, 2);
+    const savedAssignment = (await client.query('SELECT assignee_id,subtasks FROM tasks WHERE id=$1', [single.id])).rows[0];
+    assert.equal(savedAssignment.assignee_id, users.engineer.id);
+    assert.equal(savedAssignment.subtasks.length, 2);
     const successfulRequestId = operationLogs.mock.calls.find(call => call.arguments[0] === '[CREATE TASK] inserting task (including embedded subtasks)').arguments[1].request_id;
     const labels = operationLogs.mock.calls.filter(call => call.arguments[1]?.request_id === successfulRequestId).map(call => call.arguments[0]);
     for (const label of ['database connection', 'checking project access and dates', 'looking up assignee',
@@ -152,7 +215,7 @@ test('PostgreSQL migration and task HTTP workflows preserve legacy data and atom
       assert.ok(labels.includes(`[CREATE TASK] ${label}`), `Missing query label: ${label}`);
     }
     assert.equal(labels.filter(label => label === '[CREATE TASK] database connection').length, 1);
-    assert.equal((await client.query('SELECT COUNT(*)::int AS count FROM resources')).rows[0].count, 1);
+    assert.equal((await client.query("SELECT COUNT(*)::int AS count FROM resources WHERE project='TASK-PHASE-TEST' AND name='Cement'")).rows[0].count, 1);
     const multiBody = { ...baseBody, task_name: 'Combined works',
       construction_phase_categories: [' Structural ', 'Site Development', 'Structural', 'Construction Phase'] };
     delete multiBody.phases;
@@ -224,7 +287,7 @@ test('PostgreSQL migration and task HTTP workflows preserve legacy data and atom
     response = await request(`/projects/${code}/progress`);
     assert.equal(response.status, 200, JSON.stringify(response.body));
     assert.equal(Number(response.body.data.taskBreakdown.find(item => item.phase === 'Turnover Phase').total_tasks), 1);
-    assert.equal(response.body.data.stats.totalTasks, (await client.query('SELECT COUNT(*)::int AS count FROM tasks')).rows[0].count);
+    assert.equal(response.body.data.stats.totalTasks, (await client.query('SELECT COUNT(*)::int AS count FROM tasks WHERE project_id=$1', [projectId])).rows[0].count);
     // Additive report and active-task responses expose all categories too.
     const reportId = (await client.query("INSERT INTO reports (task_id,report_date,status) VALUES ($1,CURRENT_DATE,'Final') RETURNING id", [multi.id])).rows[0].id;
     response = await request(`/reports/${reportId}`);

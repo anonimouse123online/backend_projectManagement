@@ -21,6 +21,7 @@ before(async () => {
   mock.method(pool, 'query', async (sql, values) => {
     queryCalls.push({ sql, values });
     if (sql.includes('SELECT *') && sql.includes('FROM users')) return { rows: selectedUser ? [{ ...selectedUser }] : [] };
+    if (sql.includes('SELECT id, email, role')) return { rows: currentRole ? [{ ...user, role: currentRole }] : [] };
     if (sql.includes('SELECT id, full_name')) return { rows: currentRole ? [{ ...user, role: currentRole }] : [] };
     if (sql.includes('COUNT(*) AS total')) return { rows: [{ total: '1' }] };
     if (sql.includes('login_security_logs')) return { rows: values?.[0] === '999' ? [] : [{
@@ -164,10 +165,11 @@ test('malformed credentials and metadata produce 400 without querying or saving'
 test('log endpoints reject anonymous, engineer, demoted, inactive and expired accounts', async () => {
   for (const path of ['/security/login-logs', '/security/login-logs/1']) {
     assert.equal((await fetch(base + path)).status, 401);
+    currentRole = 'engineer';
     assert.equal((await fetch(base + path, { headers: { Authorization: `Bearer ${token('engineer')}` } })).status, 403);
     for (const role of ['engineer', null]) {
       currentRole = role;
-      assert.equal((await fetch(base + path, { headers: { Authorization: `Bearer ${token('admin')}` } })).status, 403);
+      assert.equal((await fetch(base + path, { headers: { Authorization: `Bearer ${token('admin')}` } })).status, role ? 403 : 401);
     }
     currentRole = 'admin';
     const expired = jwt.sign({ id: user.id, role: 'admin' }, process.env.JWT_SECRET, { expiresIn: -1 });

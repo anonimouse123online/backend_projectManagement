@@ -1,9 +1,12 @@
 const pool = require('../db');
+const projectAccess = require('../services/projectAccessService');
 const taskPhases = require('../services/taskPhaseService');
 const workStatuses = require('../services/taskWorkStatusService');
 const taskResources = require('../services/taskResourceService');
 const money = require('../services/moneyService');
 const { createTaskDiagnostics } = require('../services/taskCreationDiagnostics');
+const reportImages = require('../services/reportImageService');
+const taskSchedule = require('../services/taskScheduleService');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -69,7 +72,7 @@ const getAccessibleProject = async (
       )
 
       AND (
-        p.owner_id = $2::uuid
+        ${projectAccess.projectScope('p', 2)}
 
         OR EXISTS (
           SELECT 1
@@ -77,7 +80,7 @@ const getAccessibleProject = async (
           FROM project_members pm
 
           WHERE pm.project_id = p.code
-            AND pm.user_id = $2::uuid
+            AND ${projectAccess.membership('pm', 2)}
         )
       )
 
@@ -134,9 +137,9 @@ const getAccessibleTask = async (
     WHERE t.id::text = $1::text
 
       AND (
-        p.owner_id = $2::uuid
+        ${projectAccess.projectScope('p', 2)}
 
-        OR t.assignee_id = $2::uuid
+
 
         OR EXISTS (
           SELECT 1
@@ -144,7 +147,7 @@ const getAccessibleTask = async (
           FROM project_members pm
 
           WHERE pm.project_id = p.code
-            AND pm.user_id = $2::uuid
+            AND ${projectAccess.membership('pm', 2)}
         )
       )
 
@@ -245,17 +248,15 @@ exports.getTasks = async function (req, res) {
     const conditions = [
       `
       (
-        p.owner_id = $1::uuid
-
-        OR t.assignee_id = $1::uuid
-
+        ${projectAccess.projectScope('p', 1)}
+        OR (t.project_id IS NULL AND t.assignee_id = $1::uuid)
         OR EXISTS (
           SELECT 1
 
           FROM project_members pm
 
           WHERE pm.project_id = p.code
-            AND pm.user_id = $1::uuid
+            AND ${projectAccess.membership('pm', 1)}
         )
       )
       `
@@ -481,11 +482,16 @@ exports.getTasks = async function (req, res) {
         t.due_date::text
           AS due_date,
 
+        t.start_date::text AS start_date,
+        t.estimated_duration_days,
+        COALESCE((SELECT jsonb_agg(td.predecessor_task_id::text ORDER BY td.predecessor_task_id)
+          FROM task_dependencies td WHERE td.task_id = t.id), '[]'::jsonb) AS predecessor_task_ids,
+
         t.priority,
 
         t.status,
 
-        
+
 
         t.materials_required,
 
@@ -502,7 +508,7 @@ exports.getTasks = async function (req, res) {
       FROM tasks t
 
 
-      INNER JOIN projects p
+      LEFT JOIN projects p
         ON p.id = t.project_id
 
 
@@ -639,11 +645,16 @@ exports.getTaskById = async function (req, res) {
           t.due_date::text
             AS due_date,
 
+          t.start_date::text AS start_date,
+          t.estimated_duration_days,
+          COALESCE((SELECT jsonb_agg(td.predecessor_task_id::text ORDER BY td.predecessor_task_id)
+            FROM task_dependencies td WHERE td.task_id = t.id), '[]'::jsonb) AS predecessor_task_ids,
+
           t.priority,
 
           t.status,
 
-          
+
 
           t.materials_required,
 
@@ -699,12 +710,10 @@ exports.getTaskById = async function (req, res) {
 
           AND (
 
-            p.owner_id =
-              $2::uuid
+            ${projectAccess.projectScope('p', 2)}
 
 
-            OR t.assignee_id =
-              $2::uuid
+
 
 
             OR EXISTS (
@@ -716,8 +725,7 @@ exports.getTaskById = async function (req, res) {
               WHERE pm.project_id =
                 p.code
 
-                AND pm.user_id =
-                  $2::uuid
+                AND ${projectAccess.membership('pm', 2)}
 
             )
 
@@ -777,7 +785,7 @@ exports.getTaskById = async function (req, res) {
 
     });
   }
-};  
+};
 
 // ============================================================
 // SYNC PROJECT PROGRESS FROM TASKS & SUBTASKS
@@ -819,7 +827,10 @@ const syncProjectProgress = async (projectId, db = pool) => {
 
     const overallPct = Math.min(100, Math.max(0, Math.round((totalTaskScore / tasks.length) * 100)));
 
-    const targetStatus = overallPct === 100 ? 'Completed' : overallPct > 0 ? 'Ongoing' : 'Pending';
+    const targetStatus =
+      overallPct === 100 ? 'Completed' :
+      overallPct > 0 ? 'Ongoing' :
+      null;
 
     await db.query(
       `UPDATE projects
@@ -980,6 +991,13 @@ exports.createTask = async function (req, res) {
       ''
     ).trim();
 
+    const estimatedDurationDays = req.body.estimatedDurationDays ?? req.body.estimated_duration_days ?? null;
+    const predecessorIds = req.body.predecessorTaskIds ?? req.body.predecessor_task_ids ?? [];
+    if (!Array.isArray(predecessorIds) || predecessorIds.some(id => typeof id !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
+      return res.status(400).json({ success: false, error: 'predecessor_task_ids must be an array of task UUIDs.' });
+    }
+
 
     const priority = (
       req.body.priority ||
@@ -1127,7 +1145,7 @@ exports.createTask = async function (req, res) {
     }
 
     if (project.start_date) {
-      const projStart = project.start_date;
+      const projStart = taskSchedule.dateOnlyString(project.start_date);
       if (startDate && startDate < projStart) {
         return res.status(400).json({
           success: false,
@@ -1143,7 +1161,7 @@ exports.createTask = async function (req, res) {
     }
 
     if (project.end_date) {
-      const projEnd = project.end_date;
+      const projEnd = taskSchedule.dateOnlyString(project.end_date);
       if (startDate && startDate > projEnd) {
         return res.status(400).json({
           success: false,
@@ -1252,6 +1270,12 @@ exports.createTask = async function (req, res) {
       });
     }
 
+    const scheduleValidation = await taskSchedule.validateSchedule({ db, project, taskName, startDate: startDate || null,
+      dueDate, assigneeId: assignee.id, estimatedDurationDays, predecessorIds });
+    if (scheduleValidation.status === 'INVALID') {
+      return res.status(400).json({ success: false, error: 'Task schedule is invalid.', schedule_validation: scheduleValidation });
+    }
+
 
     // ============================================================
     // ============================================================
@@ -1321,6 +1345,8 @@ exports.createTask = async function (req, res) {
           phase,
           assignee_id,
           due_date,
+          start_date,
+          estimated_duration_days,
           priority,
 
           materials_required,
@@ -1337,13 +1363,14 @@ exports.createTask = async function (req, res) {
           $3,
           $4,
           $5,
-
           $6,
           $7,
           $8,
           $9,
           $10,
-          $11
+          $11,
+          $12,
+          $13
         )
         RETURNING *
         `,
@@ -1352,6 +1379,8 @@ exports.createTask = async function (req, res) {
           phase,
           assignee.id,
           dueDate,
+          startDate || null,
+          estimatedDurationDays || null,
           priority,
 
           materialsRequired,
@@ -1362,6 +1391,8 @@ exports.createTask = async function (req, res) {
           initialProgressPct,
         ]
       );
+
+    await taskSchedule.persistDependencies(db, result.rows[0].id, predecessorIds);
 
     await taskPhases.replacePhases(result.rows[0].id, phases, db);
 
@@ -1378,7 +1409,7 @@ exports.createTask = async function (req, res) {
     // SYNC MATERIALS & RESOURCES TO INVENTORY (resources table)
     // ============================================================
     try {
-      const projectName = project.name;
+      const projectName = project.code;
 
       if (Array.isArray(allocatedMaterials) && allocatedMaterials.length > 0) {
         for (const item of allocatedMaterials) {
@@ -1397,6 +1428,8 @@ exports.createTask = async function (req, res) {
             `SELECT id, COALESCE(quantity, 0)::numeric + $3::numeric AS new_quantity, min_threshold FROM resources
              WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
                AND LOWER(TRIM(project)) = LOWER(TRIM($2))
+               AND task_id IS NULL
+               AND (SELECT count(*) FROM projects resource_match WHERE lower(trim(resource_match.code)) = lower(trim($2)) OR lower(trim(resource_match.name)) = lower(trim($2))) = 1
              LIMIT 1`,
             [itemName, projectName, quantity]
           );
@@ -1447,6 +1480,8 @@ exports.createTask = async function (req, res) {
             `SELECT id, COALESCE(quantity, 0)::numeric + $3::numeric AS new_quantity, min_threshold FROM resources
              WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
                AND LOWER(TRIM(project)) = LOWER(TRIM($2))
+               AND task_id IS NULL
+               AND (SELECT count(*) FROM projects resource_match WHERE lower(trim(resource_match.code)) = lower(trim($2)) OR lower(trim(resource_match.name)) = lower(trim($2))) = 1
              LIMIT 1`,
             [name, projectName, qty]
           );
@@ -1489,8 +1524,11 @@ exports.createTask = async function (req, res) {
       message:
         'Task created successfully.',
 
-      data:
-        workStatuses.taskFields(createdTask)
+      data: {
+        ...workStatuses.taskFields(createdTask),
+        predecessor_task_ids: predecessorIds,
+        schedule_validation: scheduleValidation,
+      }
 
     });
 
@@ -1563,7 +1601,15 @@ exports.updateTask = async function (req, res) {
       add(column, value.trim());
     }
     if (phases) add('phase', phases[0]);
-    if (!changes.length) throw new taskPhases.PhaseError('No update fields provided.');
+    const scheduleFieldsProvided = ['start_date', 'startDate', 'due_date', 'dueDate',
+      'estimated_duration_days', 'estimatedDurationDays', 'predecessor_task_ids', 'predecessorTaskIds']
+      .some(key => Object.hasOwn(body, key));
+    const rawPredecessors = body.predecessor_task_ids ?? body.predecessorTaskIds;
+    if (rawPredecessors !== undefined && (!Array.isArray(rawPredecessors) || rawPredecessors.some(id => typeof id !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)))) {
+      throw new taskPhases.PhaseError('predecessor_task_ids must be an array of task UUIDs.');
+    }
+    if (!changes.length && !scheduleFieldsProvided) throw new taskPhases.PhaseError('No update fields provided.');
     client = await pool.connect();
     await client.query('BEGIN'); transaction = true;
     const task = await getAccessibleTask(req.params.id, req.user.id, client);
@@ -1576,17 +1622,55 @@ exports.updateTask = async function (req, res) {
       await client.query('ROLLBACK'); transaction = false;
       return res.status(404).json({ success: false, error: 'Task not found or you do not have access.' });
     }
+    const currentResult = await client.query(`SELECT t.task_name, t.start_date::text, t.due_date::text, t.assignee_id,
+      t.estimated_duration_days, p.id AS project_id, p.start_date AS project_start_date, p.end_date AS project_end_date
+      FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = $1`, [task.id]);
+    const current = currentResult.rows[0];
+    const startInput = Object.hasOwn(body, 'start_date') ? body.start_date : Object.hasOwn(body, 'startDate') ? body.startDate : current.start_date;
+    const dueInput = Object.hasOwn(body, 'due_date') ? body.due_date : Object.hasOwn(body, 'dueDate') ? body.dueDate : current.due_date;
+    const durationInput = Object.hasOwn(body, 'estimated_duration_days') ? body.estimated_duration_days
+      : Object.hasOwn(body, 'estimatedDurationDays') ? body.estimatedDurationDays : current.estimated_duration_days;
+    const predecessorResult = await client.query('SELECT predecessor_task_id::text FROM task_dependencies WHERE task_id = $1', [task.id]);
+    const predecessorIds = rawPredecessors === undefined ? predecessorResult.rows.map(row => row.predecessor_task_id) : rawPredecessors;
+    let scheduleValidation;
+    if (scheduleFieldsProvided) {
+      scheduleValidation = await taskSchedule.validateSchedule({ db: client, taskName: body.task_name || body.taskName || task.task_name,
+        project: { id: current.project_id, start_date: current.project_start_date, end_date: current.project_end_date },
+        taskId: task.id, startDate: startInput, dueDate: dueInput, assigneeId: current.assignee_id,
+        estimatedDurationDays: durationInput, predecessorIds });
+      if (scheduleValidation.status === 'INVALID') {
+        await client.query('ROLLBACK'); transaction = false;
+        return res.status(400).json({ success: false, error: 'Task schedule is invalid.', schedule_validation: scheduleValidation });
+      }
+      if (Object.hasOwn(body, 'start_date') || Object.hasOwn(body, 'startDate')) add('start_date', startInput || null);
+      if (Object.hasOwn(body, 'due_date') || Object.hasOwn(body, 'dueDate')) {
+        if (!dueInput) throw new taskPhases.PhaseError('Task due date cannot be empty.');
+        add('due_date', dueInput);
+      }
+      if (Object.hasOwn(body, 'estimated_duration_days') || Object.hasOwn(body, 'estimatedDurationDays')) add('estimated_duration_days', durationInput || null);
+      await taskSchedule.persistDependencies(client, task.id, predecessorIds);
+    }
     if (Object.hasOwn(body, 'phase') && !Object.hasOwn(body, 'phases') && !Object.hasOwn(body, 'construction_phase_categories')) {
       const current = await client.query('SELECT COUNT(*)::int AS count FROM task_phases WHERE task_id = $1', [task.id]);
       if (current.rows[0].count > 1) throw new taskPhases.PhaseError('Use phases to edit a task with multiple construction phase categories.');
     }
-    values.push(task.id);
-    const result = await client.query(`UPDATE tasks SET ${changes.join(', ')}, updated_at = NOW()
-      WHERE id = $${values.length} RETURNING *`, values);
+    let updatedRow = currentResult.rows[0];
+    if (changes.length) {
+      values.push(task.id);
+      const result = await client.query(`UPDATE tasks SET ${changes.join(', ')}, updated_at = NOW()
+        WHERE id = $${values.length} RETURNING *`, values);
+      updatedRow = result.rows[0];
+    } else {
+      const result = await client.query('SELECT * FROM tasks WHERE id = $1', [task.id]);
+      updatedRow = result.rows[0];
+    }
     if (phases) await taskPhases.replacePhases(task.id, phases, client);
-    const updated = await taskPhases.withPhases(result.rows[0], client);
+    const updated = await taskPhases.withPhases(updatedRow, client);
     await client.query('COMMIT'); transaction = false;
-    return res.status(200).json({ success: true, message: 'Task updated successfully.', data: workStatuses.taskFields(updated) });
+    return res.status(200).json({ success: true, message: 'Task updated successfully.', data: {
+      ...workStatuses.taskFields(updated), predecessor_task_ids: predecessorIds,
+      ...(scheduleFieldsProvided ? { schedule_validation: scheduleValidation } : {}),
+    } });
   } catch (error) {
     if (transaction) {
       try { await client.query('ROLLBACK'); }
@@ -1722,6 +1806,20 @@ exports.assignTask = async function (
       });
     }
 
+    const scheduleState = await pool.query(`SELECT t.start_date::text, t.due_date::text,
+      t.estimated_duration_days, p.id AS project_id, p.start_date AS project_start_date, p.end_date AS project_end_date
+      FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = $1`, [id]);
+    const currentSchedule = scheduleState.rows[0];
+    const predecessors = await pool.query('SELECT predecessor_task_id::text FROM task_dependencies WHERE task_id = $1', [id]);
+    const scheduleValidation = await taskSchedule.validateSchedule({ db: pool, taskName: task.task_name,
+      project: { id: currentSchedule.project_id, start_date: currentSchedule.project_start_date, end_date: currentSchedule.project_end_date },
+      taskId: id, startDate: currentSchedule.start_date, dueDate: currentSchedule.due_date,
+      estimatedDurationDays: currentSchedule.estimated_duration_days, assigneeId,
+      predecessorIds: predecessors.rows.map(row => row.predecessor_task_id) });
+    if (scheduleValidation.status === 'INVALID') {
+      return res.status(400).json({ success: false, error: 'Task schedule is invalid.', schedule_validation: scheduleValidation });
+    }
+
 
     // ============================================================
     // ASSIGN
@@ -1751,8 +1849,7 @@ exports.assignTask = async function (
 
       success: true,
 
-      data:
-        workStatuses.taskFields(result.rows[0])
+      data: { ...workStatuses.taskFields(result.rows[0]), schedule_validation: scheduleValidation }
 
     });
 
@@ -1797,7 +1894,7 @@ exports.getUsers = async function(req, res) {
          SELECT p.id AS project_uuid
          FROM projects p
          JOIN project_members pm ON pm.project_id = p.code
-         WHERE pm.user_id = $1::uuid
+         WHERE ${projectAccess.membership('pm', 1)}
        )
        SELECT
          u.id, u.full_name, u.email, u.role,
@@ -1805,21 +1902,21 @@ exports.getUsers = async function(req, res) {
          CASE
            WHEN u.id = $1::uuid THEN 'self'
            WHEN EXISTS (
-             SELECT 1 FROM project_members pm 
-             JOIN projects p ON p.code = pm.project_id 
+             SELECT 1 FROM project_members pm
+             JOIN projects p ON p.code = pm.project_id
              WHERE pm.user_id = u.id AND p.owner_id = $1::uuid
            ) THEN 'my_member'
            WHEN EXISTS (
-             SELECT 1 FROM projects p 
-             JOIN project_members pm ON pm.project_id = p.code 
-             WHERE p.owner_id = u.id AND pm.user_id = $1::uuid
+             SELECT 1 FROM projects p
+             JOIN project_members pm ON pm.project_id = p.code
+             WHERE p.owner_id = u.id AND ${projectAccess.membership('pm', 1)}
            ) THEN 'project_owner'
            ELSE 'co_member'
          END AS relationship,
          (
            u.id != $1::uuid AND EXISTS (
-             SELECT 1 FROM project_members pm 
-             JOIN projects p ON p.code = pm.project_id 
+             SELECT 1 FROM project_members pm
+             JOIN projects p ON p.code = pm.project_id
              WHERE pm.user_id = u.id AND p.owner_id = $1::uuid
            )
          ) AS can_remove
@@ -1954,6 +2051,7 @@ if (!taskAccess) {
       success: true,
       message: imagePaths.length + ' image(s) uploaded successfully.',
       images_saved: imagePaths.length,
+      images: reportImages.imagesForReport(imagePaths, taskId).map(image => image.url),
       task: taskResult.rows[0].task_name,
       date: date
     });
@@ -1969,6 +2067,9 @@ exports.getTaskImages = async function(req, res) {
   const date = req.query.date || new Date().toISOString().split('T')[0];
   console.log('[ROUTE] GET /tasks/' + taskId + '/images?date=' + date);
   try {
+    if (!(await getAccessibleTask(taskId, req.user?.id))) {
+      return res.status(404).json({ success: false, message: 'Task not found or you do not have access.' });
+    }
     const result = await pool.query(
       'SELECT image_paths, upload_date, status FROM task_images WHERE task_id = $1 AND upload_date = $2',
       [taskId, date]
@@ -1977,7 +2078,7 @@ exports.getTaskImages = async function(req, res) {
       console.log('[ROUTE] GET /tasks/' + taskId + '/images → no uploads for', date);
       return res.json({ success: true, images: [], status: 'no uploads yet', date: date });
     }
-    const images = result.rows[0].image_paths;
+    const images = reportImages.imagesForReport(result.rows[0].image_paths, taskId).map(image => image.url);
     console.log('[ROUTE] GET /tasks/' + taskId + '/images → found', images.length, 'image(s), status:', result.rows[0].status);
     res.json({
       success: true,
@@ -2097,7 +2198,7 @@ async function _processReportInBackground({ task, taskId, date, imagePaths }) {
   try {
     console.log('[AI] Background report generation started for task:', task.task_name);
 
-    const { report, observations } = await generateAIReport({
+    const { report, observations, imagePaths: analyzedImagePaths } = await generateAIReport({
       task:       { task_name: task.task_name, project_name: task.project_name, location: task.project_location, assignee: task.assignee },
       taskId,
       date,
@@ -2110,14 +2211,16 @@ async function _processReportInBackground({ task, taskId, date, imagePaths }) {
 
     // Save report to DB
     await pool.query(
-      `INSERT INTO reports (task_id, report_date, observations, report_text, status)
-       VALUES ($1, $2, $3::jsonb, $4, 'completed')
+      `INSERT INTO reports (task_id, report_date, observations, report_text, status, image_paths)
+       VALUES ($1, $2, $3::jsonb, $4, 'completed', $5::jsonb)
        ON CONFLICT (task_id, report_date)
        DO UPDATE SET
          observations = $3::jsonb,
          report_text  = $4,
-         status       = 'completed'`,
-      [taskId, date, JSON.stringify(observations), report]
+         status       = 'completed',
+         image_paths  = $5::jsonb`,
+      [taskId, date, JSON.stringify(observations), report,
+        JSON.stringify(reportImages.imagesForReport(analyzedImagePaths, taskId).map(image => image.url))]
     );
 
     // Mark images as processed
@@ -2149,7 +2252,7 @@ exports.uploadTaskReport = async function(req, res) {
     title,
     report_text,
     report_type
-  } = req.body;
+  } = req.body || {};
 
   console.log('════════════════════════════════════════');
   console.log('[UPLOAD ENGINEER REPORT]');
@@ -2176,7 +2279,11 @@ exports.uploadTaskReport = async function(req, res) {
       });
     }
 
-    if (!report_text || !report_text.trim()) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId)) {
+      return res.status(400).json({ success: false, message: 'Invalid task ID.' });
+    }
+
+    if (typeof report_text !== 'string' || !report_text.trim()) {
       return res.status(400).json({
         success: false,
         message: 'Report text is required.'
@@ -2269,6 +2376,14 @@ exports.uploadTaskReport = async function(req, res) {
       task.assignee_id ||
       null;
 
+    const imageReferences = await reportImages.submissionImages(pool, taskId, req.body);
+    if (imageReferences.images.length && !(await getAccessibleTask(taskId, req.user?.id))) {
+      return res.status(404).json({
+        success: false,
+        message: 'Task not found or you do not have access.'
+      });
+    }
+
 
     // --------------------------------------------------------
     // INSERT INTO ADMIN PROJECT REPORTS
@@ -2317,7 +2432,8 @@ exports.uploadTaskReport = async function(req, res) {
         prepared_by,
         source,
 
-        created_at
+        created_at,
+        image_paths
 
       )
 
@@ -2328,7 +2444,7 @@ exports.uploadTaskReport = async function(req, res) {
 
         $3,
         $4,
-        CURRENT_DATE,
+        $9::date,
 
         $5,
 
@@ -2344,7 +2460,8 @@ exports.uploadTaskReport = async function(req, res) {
         $6,
         'Mobile Engineer',
 
-        NOW()
+        NOW(),
+        $8::jsonb
 
       )
 
@@ -2376,13 +2493,16 @@ exports.uploadTaskReport = async function(req, res) {
 
         preparedBy,
 
-        extractedManpower
+        extractedManpower,
+        JSON.stringify(imageReferences.imagePaths),
+        imageReferences.reportDate
       ]
     );
 
 
     const uploadedReport =
       result.rows[0];
+    uploadedReport.images = imageReferences.images;
 
 
     console.log('════════════════════════════════════════');
@@ -2430,7 +2550,7 @@ exports.uploadTaskReport = async function(req, res) {
     console.error('════════════════════════════════════════');
 
 
-    return res.status(500).json({
+    return res.status(err.status || 500).json({
 
       success: false,
 

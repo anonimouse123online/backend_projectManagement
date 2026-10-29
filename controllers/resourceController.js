@@ -1,11 +1,12 @@
 const pool = require('../db');
+const access = require('../services/projectAccessService');
 const money = require('../services/moneyService');
 
 exports.getResources = async (req, res) => {
   try {
     const { category, status, project, search } = req.query;
-    const conditions = [];
-    const params = [];
+    const conditions = [`EXISTS (SELECT 1 FROM projects p WHERE ${access.resourceProject('resources')} AND ${access.projectScope('p', 1)})`];
+    const params = [req.user.id];
 
     if (category && category !== 'All Resources' && category !== 'All Categories') {
       params.push(category);
@@ -19,7 +20,7 @@ exports.getResources = async (req, res) => {
 
     if (project && project !== 'All Projects') {
       params.push(project);
-      conditions.push(`project ILIKE $${params.length}`);
+      conditions.push(`EXISTS (SELECT 1 FROM projects p WHERE ${access.resourceProject('resources')} AND (p.name ILIKE $${params.length} OR p.code ILIKE $${params.length}))`);
     }
 
     if (search) {
@@ -33,7 +34,7 @@ exports.getResources = async (req, res) => {
       `SELECT
          id, name, supplier, category,
          quantity, unit, min_threshold AS "minThreshold",
-         unit_price AS "unitPrice", project,
+         unit_price AS "unitPrice", (SELECT p.name FROM projects p WHERE ${access.resourceProject('resources')} LIMIT 1) AS project,
          CASE
            WHEN quantity <= 0 THEN 'Out of stock'
            WHEN quantity <= min_threshold THEN 'Low stock'
@@ -198,6 +199,8 @@ exports.deleteResource = async (req, res) => {
           queryParams.push(resource.task_id);
         }
 
+        queryParams.push(req.resourceProject.id);
+        taskQuery = `SELECT t.id, t.materials_required FROM tasks t WHERE t.project_id = $${queryParams.length}::uuid AND t.id IN (${taskQuery.replace('t.id, t.materials_required', 't.id')})`;
         const tRes = await pool.query(taskQuery, queryParams);
 
         for (const task of tRes.rows) {

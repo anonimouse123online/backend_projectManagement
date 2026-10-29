@@ -1,8 +1,12 @@
 const pool = require('../db');
+const access = require('../services/projectAccessService');
 const taskPhases = require('../services/taskPhaseService');
 const workStatuses = require('../services/taskWorkStatusService');
 const projectService = require('../services/projectService');
 const money = require('../services/moneyService');
+const { imagesForReport: taskImagesForReport } = require('../services/reportImageService');
+const projectReportImages = require('../services/projectReportImageService');
+const projectFiles = require('../services/projectFileService');
 const { countColumns, countJoin } = require('../services/projectIssueService');
 const crypto = require('crypto');
 const path = require('path');
@@ -17,6 +21,12 @@ const generateInviteCode = () => {
     crypto.randomBytes(2).toString('hex').toUpperCase();
 
   return `${part()}-${part()}`;
+};
+
+const projectPositionOf = value => {
+  if (typeof value !== 'string') return null;
+  const position = value.trim();
+  return position && position.length <= 50 ? position : null;
 };
 
 
@@ -52,60 +62,9 @@ const authRequired = (req, res) => {
 // project_members.project_id references projects.code
 // ============================================================
 
-const getAccessibleProject = async (
-  code,
-  userId,
-  userEmail
-) => {
-
-  if (!userId) {
-    return null;
-  }
-
-  const { rows } = await pool.query(
-    `
-    SELECT
-      p.id,
-      p.code,
-      p.name,
-      p.status,
-      p.owner_id
-
-    FROM projects p
-
-    WHERE p.code = $1
-
-      AND (
-        p.owner_id = $2
-
-        OR EXISTS (
-          SELECT 1
-          FROM project_members pm
-
-          WHERE pm.project_id = p.code
-
-            AND (
-              pm.user_id = $2
-
-              OR (
-                $3::text IS NOT NULL
-                AND LOWER(TRIM(pm.user_name))
-                    = LOWER(TRIM($3))
-              )
-            )
-        )
-      )
-
-    LIMIT 1
-    `,
-    [
-      code,
-      userId,
-      userEmail || null
-    ]
-  );
-
-  return rows[0] || null;
+const getAccessibleProject = async (code, userId) => {
+  try { return await access.getProject(code, { id: userId }); }
+  catch (error) { if ([401, 404].includes(error.status)) return null; throw error; }
 };
 
 
@@ -298,12 +257,11 @@ const updateProjectStatus = async (req, res) => {
 
     const allowed = [
       'Planning',
-      'Pending',
       'Ongoing',
       'Completed'
     ];
 
-    const cleanStatus = (status || '').trim();
+    const cleanStatus = typeof status === 'string' ? status.trim() : '';
     const matchedStatus = allowed.find(
       (a) => a.toLowerCase() === cleanStatus.toLowerCase()
     );
@@ -373,6 +331,72 @@ const updateProjectStatus = async (req, res) => {
         'Failed to update project status',
       error: err.message
     });
+  }
+};
+
+// Update only projects.end_date. Keep task schedules untouched and report any
+// task deadlines that would fall beyond the proposed project deadline.
+const updateProjectDueDate = async (req, res) => {
+  if (authRequired(req, res)) return;
+  const { code } = req.params;
+  const { dueDate, reason } = req.body || {};
+  if (typeof dueDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) {
+    return res.status(400).json({ success: false, message: 'dueDate must be a valid date in YYYY-MM-DD format.' });
+  }
+  const [year, month, day] = dueDate.split('-').map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 || parsed.getUTCDate() !== day) {
+    return res.status(400).json({ success: false, message: 'dueDate must be a valid date in YYYY-MM-DD format.' });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+    const { rows: projects } = await client.query(
+      `SELECT code, start_date::text AS start_date, end_date::text AS end_date
+       FROM projects WHERE code = $1 FOR UPDATE`, [code]);
+    if (!projects.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, message: `Project ${code} not found.` });
+    }
+    const project = projects[0];
+    if (project.start_date && dueDate < project.start_date) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, message: 'Project due date cannot be earlier than its start date.' });
+    }
+    if (dueDate !== project.end_date && (typeof reason !== 'string' || !reason.trim())) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, message: 'A reason is required when changing the project due date.' });
+    }
+    const { rows: affectedTasks } = await client.query(
+      `SELECT id::text, task_name, due_date::text AS due_date
+       FROM tasks WHERE project_id = (SELECT id FROM projects WHERE code = $1)
+         AND due_date > $2::date ORDER BY due_date, task_name`, [code, dueDate]);
+    if (affectedTasks.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ success: false, message: 'Project due date conflicts with existing task deadlines.',
+        data: { affectedTasks } });
+    }
+    let updated = project;
+    if (dueDate !== project.end_date) {
+      const result = await client.query(
+        `UPDATE projects SET end_date = $1::date, updated_at = NOW() WHERE code = $2
+         RETURNING code, start_date::text AS "startDate", end_date::text AS "dueDate"`, [dueDate, code]);
+      updated = result.rows[0];
+    } else {
+      updated = { code: project.code, startDate: project.start_date, dueDate: project.end_date };
+    }
+    await client.query('COMMIT');
+    return res.status(200).json({ success: true, message: 'Project due date updated successfully', data: updated });
+  } catch (error) {
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* preserve original error */ }
+    }
+    console.error('updateProjectDueDate error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to update project due date.' });
+  } finally {
+    client?.release();
   }
 };
 
@@ -502,7 +526,17 @@ const createProject = async (req, res) => {
 
     // Guarantee unique project code & default status to Planning
     const finalCode = await getUniqueProjectCode(code);
-    const projectStatus = status || 'Planning';
+    const allowedStatuses = ['Planning', 'Ongoing', 'Completed'];
+    const cleanStatus = typeof status === 'string' ? status.trim() : '';
+    const projectStatus = status == null || (typeof status === 'string' && cleanStatus === '')
+      ? 'Planning'
+      : allowedStatuses.find((allowedStatus) => allowedStatus.toLowerCase() === cleanStatus.toLowerCase());
+    if (!projectStatus) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status. Must be one of: ${allowedStatuses.join(', ')}`
+      });
+    }
     const projectPhase = (phase && String(phase).trim()) || 'Foundation';
 
 
@@ -748,8 +782,9 @@ const joinProject = async (req, res) => {
 
 
   const {
-    invite_code
-  } = req.body;
+    invite_code,
+    position
+  } = req.body || {};
 
 
   const userId =
@@ -766,6 +801,14 @@ const joinProject = async (req, res) => {
       success: false,
       message:
         'invite_code is required.'
+    });
+  }
+
+  const memberPosition = projectPositionOf(position);
+  if (!memberPosition) {
+    return res.status(400).json({
+      success: false,
+      message: 'position is required and must contain 1 to 50 characters.'
     });
   }
 
@@ -858,8 +901,7 @@ const joinProject = async (req, res) => {
           AND (
             user_id = $2
 
-            OR LOWER(TRIM(user_name))
-              = LOWER(TRIM($3))
+            OR (user_id IS NULL AND LOWER(TRIM(user_name)) = LOWER(TRIM($3)))
           )
 
         LIMIT 1
@@ -892,8 +934,6 @@ const joinProject = async (req, res) => {
     // This keeps compatibility with your old data.
     // ============================================================
 
-    const memberRole = req.user?.role || 'Member';
-
     await pool.query(
       `
       INSERT INTO project_members
@@ -915,7 +955,7 @@ const joinProject = async (req, res) => {
         invite.project_id,
         userId,
         userEmail,
-        memberRole
+        memberPosition
       ]
     );
 
@@ -1152,11 +1192,7 @@ const getJoinedProjects = async (req, res) => {
         WHERE
           pm.user_id = $1
 
-          OR LOWER(
-            TRIM(pm.user_name)
-          ) = LOWER(
-            TRIM($2)
-          )
+          OR ($2::text IS NOT NULL AND pm.user_id IS NULL AND ${access.membership('pm', 1)})
         ) AS joined_projects
 
         ORDER BY
@@ -1389,11 +1425,7 @@ const addMember = async (req, res) => {
           AND (
             user_id = $2
 
-            OR LOWER(
-              TRIM(user_name)
-            ) = LOWER(
-              TRIM($3)
-            )
+            OR (user_id IS NULL AND LOWER(TRIM(user_name)) = LOWER(TRIM($3)))
           )
 
         LIMIT 1
@@ -1416,7 +1448,8 @@ const addMember = async (req, res) => {
     }
 
 
-    const memberRole = req.body?.role || user.role || 'Member';
+    // The invited member chooses their project position after opening the invitation.
+    const memberRole = '';
 
     await pool.query(
       `
@@ -1460,6 +1493,43 @@ const addMember = async (req, res) => {
       error:
         err.message
     });
+  }
+};
+
+
+// ============================================================
+// SET OWN PROJECT POSITION
+// PATCH /projects/:code/members/me/position
+// ============================================================
+
+const setOwnProjectPosition = async (req, res) => {
+  if (authRequired(req, res)) return;
+  const position = projectPositionOf(req.body?.position);
+  if (!position) {
+    return res.status(400).json({
+      success: false,
+      message: 'position is required and must contain 1 to 50 characters.'
+    });
+  }
+  const { code } = req.params;
+  try {
+    const project = await getAccessibleProject(code, req.user.id, req.user.email);
+    if (!project) {
+      return res.status(403).json({ success: false, message: 'You do not have access to this project.' });
+    }
+    const { rows } = await pool.query(
+      `UPDATE project_members SET role = $3
+       WHERE project_id = $1 AND user_id = $2::uuid
+       RETURNING id, project_id, user_id, role AS position`,
+      [code, req.user.id, position]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: 'Your membership was not found in this project.' });
+    }
+    return res.status(200).json({ success: true, data: rows[0] });
+  } catch (err) {
+    console.error('setOwnProjectPosition error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to save your project position.' });
   }
 };
 
@@ -1550,17 +1620,7 @@ const getProjectMembers = async (req, res) => {
 
           u.email,
 
-          COALESCE(
-            NULLIF(
-              CASE
-                WHEN LOWER(TRIM(pm.role)) = 'member' THEN NULLIF(TRIM(u.role), '')
-                ELSE NULLIF(TRIM(pm.role), '')
-              END,
-              ''
-            ),
-            u.role,
-            'Member'
-          ) AS role,
+          COALESCE(pm.role, '') AS role,
 
           u.role AS system_role,
 
@@ -1683,7 +1743,7 @@ const removeMember = async (req, res) => {
     const { rows } =
       await pool.query(
         `
-        DELETE FROM project_members
+        DELETE FROM project_members pm
 
         WHERE project_id = $1
 
@@ -1691,7 +1751,7 @@ const removeMember = async (req, res) => {
             user_id = $2
 
             OR (
-              $3::text IS NOT NULL
+              $3::text IS NOT NULL AND pm.user_id IS NULL AND ${access.membership('pm', 2)}
 
               AND LOWER(
                 TRIM(user_name)
@@ -1721,6 +1781,7 @@ const removeMember = async (req, res) => {
     }
 
 
+    await require('../services/projectIssueService').revokeProjectAccess(req.app.get('io'), project);
     return res.status(200).json({
       success: true,
       message:
@@ -2082,6 +2143,32 @@ const getProjectActiveTask = async (req, res) => {
 // GET PROJECT DOCUMENTS
 // ============================================================
 
+// Reuse the same project access check before the existing /uploads static server.
+const authorizeDocumentFile = async (req, res, next) => {
+  if (authRequired(req, res)) return;
+  const file = projectFiles.fileReference(req.projectFilePath, 'documents');
+  if (!file) return res.status(404).json({ success: false, message: 'Document not found.' });
+  try {
+    const { rows } = await pool.query(
+      `SELECT project_code, file_path FROM documents
+       WHERE regexp_replace(replace(file_path, chr(92), '/'), '^.*/', '') = ANY($1::text[])`,
+      [[file.filename, encodeURIComponent(file.filename)]]
+    );
+    const documents = rows.filter(document => projectFiles.fileReference(document.file_path, 'documents')?.url === file.url);
+    if (!documents.length) return res.status(404).json({ success: false, message: 'Document not found.' });
+    for (const document of documents) {
+      if (await getAccessibleProject(document.project_code, req.user.id, req.user.email)) {
+        projectFiles.inlineHeaders(res, file);
+        return next();
+      }
+    }
+    return res.status(403).json({ success: false, message: 'You do not have access to this project.' });
+  } catch (error) {
+    console.error('authorizeDocumentFile error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to access document.' });
+  }
+};
+
 const getDocuments = async (req, res) => {
 
   if (authRequired(req, res)) {
@@ -2166,7 +2253,7 @@ const getDocuments = async (req, res) => {
     return res.status(200).json({
       success: true,
       data:
-        rows
+        rows.map(projectFiles.documentResponse)
     });
 
 
@@ -2251,7 +2338,7 @@ const uploadDocument = async (req, res) => {
       return res.status(201).json({
         success: true,
         message: 'Documents uploaded successfully',
-        data: inserted
+        data: inserted.map(projectFiles.documentResponse)
       });
     }
 
@@ -4071,6 +4158,10 @@ const getProjectReports = async (req, res) => {
         r.id,
 
         r.project_code,
+        p.id AS project_id,
+
+        r.task_id,
+        r.image_paths,
 
         r.title,
 
@@ -4101,6 +4192,8 @@ const getProjectReports = async (req, res) => {
           AS prepared_by_role
 
       FROM project_reports r
+
+      JOIN projects p ON p.code = r.project_code
 
       LEFT JOIN users u
         ON u.id = r.prepared_by
@@ -4171,7 +4264,13 @@ const getProjectReports = async (req, res) => {
     return res.status(200).json({
       success: true,
       data:
-        rows
+        rows.map(({ image_paths, ...report }) => ({
+          ...report,
+          images: [
+            ...taskImagesForReport(image_paths, report.task_id),
+            ...projectReportImages.imagesForReport(image_paths, report.project_id),
+          ]
+        }))
     });
 
 
@@ -4227,7 +4326,8 @@ const createProjectReport = async (req, res) => {
 
     equipment_on_site,
 
-    weather
+    weather,
+    images
 
   } = req.body;
 
@@ -4246,6 +4346,12 @@ const createProjectReport = async (req, res) => {
       message:
         'title and summary are required.'
     });
+  }
+
+  const manpowerCount = manpower_count === undefined || manpower_count === null || manpower_count === ''
+    ? 0 : Number(manpower_count);
+  if (!Number.isInteger(manpowerCount) || manpowerCount < 0) {
+    return res.status(400).json({ success: false, message: 'manpower_count must be a nonnegative integer.' });
   }
 
 
@@ -4267,6 +4373,8 @@ const createProjectReport = async (req, res) => {
           'You do not have access to this project.'
       });
     }
+
+    const imagePaths = projectReportImages.validateReferences(images, accessProject.id) ?? [];
 
 
     const { rows } =
@@ -4296,6 +4404,8 @@ const createProjectReport = async (req, res) => {
 
           weather,
 
+          image_paths,
+
           status
         )
 
@@ -4316,6 +4426,7 @@ const createProjectReport = async (req, res) => {
           $9,
           $10,
           $11,
+          $12::jsonb,
           'Final'
         )
 
@@ -4343,15 +4454,15 @@ const createProjectReport = async (req, res) => {
           issues_highlighted ||
           null,
 
-          parseInt(
-            manpower_count
-          ) || 0,
+          manpowerCount,
 
           equipment_on_site ||
           null,
 
           weather ||
-          'Clear'
+          'Clear',
+
+          JSON.stringify(imagePaths)
 
         ]
       );
@@ -4364,13 +4475,17 @@ const createProjectReport = async (req, res) => {
       message:
         'Project report created successfully.',
 
-      data:
-        rows[0]
+      data: {
+        ...rows[0],
+        images: projectReportImages.imagesForReport(rows[0].image_paths, accessProject.id),
+      }
 
     });
 
 
   } catch (err) {
+
+    if (err.status) return res.status(err.status).json({ success: false, message: err.message });
 
     console.error(
       'createProjectReport error:',
@@ -4385,6 +4500,41 @@ const createProjectReport = async (req, res) => {
       error:
         err.message
     });
+  }
+};
+
+const updateProjectReport = async (req, res) => {
+  if (authRequired(req, res)) return;
+  const { code, reportId } = req.params;
+  try {
+    const project = await getAccessibleProject(code, req.user.id);
+    if (!project) return res.status(403).json({ success: false, message: 'You do not have access to this project.' });
+    const fields = [];
+    const values = [];
+    const body = req.body || {};
+    const add = (column, value) => { values.push(value); fields.push(`${column} = $${values.length}`); };
+    for (const key of ['title', 'summary', 'report_type', 'report_date', 'key_activities', 'issues_highlighted', 'equipment_on_site', 'weather']) {
+      if (Object.hasOwn(body, key)) {
+        if (typeof body[key] !== 'string' || !body[key].trim()) return res.status(400).json({ success: false, message: `${key} must be a non-empty string.` });
+        add(key, body[key].trim());
+      }
+    }
+    if (Object.hasOwn(body, 'manpower_count')) {
+      const count = Number(body.manpower_count);
+      if (!Number.isInteger(count) || count < 0) return res.status(400).json({ success: false, message: 'manpower_count must be a nonnegative integer.' });
+      add('manpower_count', count);
+    }
+    if (Object.hasOwn(body, 'images')) add('image_paths', JSON.stringify(projectReportImages.validateReferences(body.images, project.id)));
+    if (!fields.length) return res.status(400).json({ success: false, message: 'No report fields to update.' });
+    values.push(code, reportId);
+    const { rows } = await pool.query(`UPDATE project_reports SET ${fields.join(', ')}
+      WHERE project_code = $${values.length - 1} AND id = $${values.length}::uuid RETURNING *`, values);
+    if (!rows.length) return res.status(404).json({ success: false, message: 'Report not found.' });
+    return res.json({ success: true, data: { ...rows[0], images: projectReportImages.imagesForReport(rows[0].image_paths, project.id) } });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ success: false, message: error.message });
+    console.error('updateProjectReport error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to update project report.' });
   }
 };
 
@@ -4403,6 +4553,8 @@ module.exports = {
 
   updateProjectStatus,
 
+  updateProjectDueDate,
+
   generateProjectCode,
 
   joinProject,
@@ -4415,6 +4567,8 @@ module.exports = {
 
   addMember,
 
+  setOwnProjectPosition,
+
   getProjectMembers,
 
   removeMember,
@@ -4424,6 +4578,8 @@ module.exports = {
   getProjectActiveTask,
 
   getDocuments,
+
+  authorizeDocumentFile,
 
   uploadDocument,
 
@@ -4443,6 +4599,7 @@ module.exports = {
 
   getProjectReports,
 
-  createProjectReport
+  createProjectReport,
+  updateProjectReport
 
 };

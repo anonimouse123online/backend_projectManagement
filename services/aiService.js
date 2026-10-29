@@ -29,11 +29,13 @@
 
     // ── Convert images to base64 strings ──────────────────────────────────────
     const base64Images = [];
+    const analyzedImagePaths = [];
     for (const imgPath of imagePaths) {
         console.log(`[AI] Checking path: ${imgPath}`);
         if (fs.existsSync(imgPath)) {
         const buffer = fs.readFileSync(imgPath);
         base64Images.push(buffer.toString('base64'));
+        analyzedImagePaths.push(imgPath);
         console.log(`[AI] ✅ Loaded image: ${path.basename(imgPath)} (${buffer.length} bytes)`);
         } else {
         console.warn(`[AI] ⚠️  Image not found on disk: ${imgPath}`);
@@ -95,6 +97,7 @@
         return {
           report:       result.report,
           observations: result.observations,
+          imagePaths:   analyzedImagePaths,
         };
       } catch (err) {
         lastError = err;

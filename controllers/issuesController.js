@@ -1,5 +1,7 @@
 const pool = require('../db');
 const service = require('../services/projectIssueService');
+const projectFiles = require('../services/projectFileService');
+const { parseIssueImages } = require('../middlewares/projectFileUpload');
 
 const issueSelect = `SELECT i.*, ru.full_name AS reporter_name, ru.role AS reporter_role,
   au.full_name AS assignee_name, au.role AS assignee_role,
@@ -54,7 +56,7 @@ async function validateAssignee(assignedTo, project, db) {
   if (!service.UUID.test(assignedTo || '')) throw new service.IssueError(400, 'Invalid assigned_to.');
   const { rows } = await db.query(`SELECT u.id FROM users u WHERE u.id = $1 AND
     (u.id = $2 OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = $3
-      AND (pm.user_id = u.id OR lower(trim(pm.user_name)) = lower(trim(u.email)))))`,
+      AND (pm.user_id = u.id OR (pm.user_id IS NULL AND to_jsonb(u)->>'email_verified' = 'true' AND lower(trim(pm.user_name)) = lower(trim(u.email))))))`,
   [assignedTo, project.owner_id, project.code]);
   if (!rows.length) throw new service.IssueError(400, 'Assignee must belong to the project.');
 }
@@ -112,7 +114,7 @@ exports.getProjectIssues = async (req, res) => {
         FROM (SELECT enriched.*, CASE enriched.status WHEN 'open' THEN 1 WHEN 'in_progress' THEN 2 ELSE 3 END AS status_order
           FROM (${issueSelect} WHERE i.project_id = $1 ${filters.map(filter => `AND ${filter}`).join(' ')}) enriched) found), '[]'::jsonb) AS issues`,
     [project.id, ...params]);
-    const issues = rows[0].issues.map(({ status_order, ...issue }) => issue);
+    const issues = rows[0].issues.map(({ status_order, ...issue }) => projectFiles.issueResponse(issue));
     return res.status(200).json({ success: true, project_id: project.id,
       active_issue_count: rows[0].active_issue_count, has_active_issues: rows[0].active_issue_count > 0,
       issues, data: issues });
@@ -122,8 +124,23 @@ exports.getProjectIssues = async (req, res) => {
 exports.createIssue = async (req, res) => {
   let client;
   let transaction = false;
+  let committed = false;
   try {
     authenticated(req);
+    const multipart = req.is?.('multipart/form-data');
+    if (multipart) {
+      // Keep the existing write permission, and check it before storing any files.
+      const uploadProject = await service.getProject(referenceOf(req), req.user);
+      service.requireWrite(uploadProject, req.user);
+      if (['planning', 'draft', 'pending'].includes(service.normalize(uploadProject.status))) {
+        throw new service.IssueError(400, 'Cannot report issues because the project is in planning and not yet activated.');
+      }
+      try { await parseIssueImages(req, res); }
+      catch (error) {
+        if (error.status === 400) throw new service.IssueError(400, error.message);
+        throw error;
+      }
+    }
     const body = req.body || {};
     const title = text(body.title, 'title', true, 255);
     const description = text(body.description, 'description', true);
@@ -147,22 +164,52 @@ exports.createIssue = async (req, res) => {
     if (own(body, 'project_id') && body.project_id !== project.id) throw new service.IssueError(400, 'project_id does not match the URL project.');
     const assignedTo = body.assigned_to ?? null;
     await validateAssignee(assignedTo, project, client);
+    let references = body.images === undefined ? [] : body.images;
+    if (multipart && typeof references === 'string') {
+      try { references = JSON.parse(references); }
+      catch { throw new service.IssueError(400, 'images must be an array of uploaded image references.'); }
+    }
+    if (!Array.isArray(references) || references.length + (req.files?.length || 0) > 20) {
+      throw new service.IssueError(400, 'images must be an array containing at most 20 images.');
+    }
+    const selected = references.map(reference => {
+      const value = typeof reference === 'string' ? reference : reference?.url;
+      const image = projectFiles.imageReferences([value])[0];
+      if (!image) throw new service.IssueError(400, 'Invalid issue image reference.');
+      return image.url;
+    });
+    if (selected.length) {
+      // Reuse exact references already uploaded by this reporter in this project.
+      const registered = await client.query(`SELECT image_paths FROM project_issues
+        WHERE project_id = $1 AND reported_by = $2 AND image_paths ?| $3::text[]`,
+      [project.id, req.user.id, selected]);
+      const allowed = new Set(registered.rows.flatMap(row => projectFiles.imageReferences(row.image_paths).map(image => image.url)));
+      if (selected.some(url => !allowed.has(url))) {
+        throw new service.IssueError(400, 'An image is not registered to you in this project.');
+      }
+    }
+    await projectFiles.prepareIssueFiles(req.files, project, req.user, client);
+    const imagePaths = [...new Set([...selected,
+      ...projectFiles.imageReferences((req.files || []).map(file => file.path)).map(image => image.url)])];
     const { rows } = await client.query(`INSERT INTO project_issues
-      (project_id, project_code, title, description, category, severity, priority, status, reported_by, location, assigned_to)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8, $9, $10) RETURNING *`,
+      (project_id, project_code, title, description, category, severity, priority, status, reported_by, location, assigned_to, image_paths)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8, $9, $10, $11::jsonb) RETURNING *`,
     [project.id, project.code, title, description, category, severity,
-      severity[0].toUpperCase() + severity.slice(1), req.user.id, location, assignedTo]);
+      severity[0].toUpperCase() + severity.slice(1), req.user.id, location, assignedTo, JSON.stringify(imagePaths)]);
     const notificationResult = await client.query(`INSERT INTO notifications
       (title, message, audience, project_id, created_by)
       VALUES ('New Project Issue', $1, 'project', $2, $3) RETURNING *`,
     [`${project.name} has a new issue: ${title}.`, project.code, req.user.id]);
     const counts = await service.getCounts(project.id, client);
-    await client.query('COMMIT'); transaction = false;
+    await client.query('COMMIT'); transaction = false; committed = true;
     client.release(); client = null;
     await publish(req, project, counts, notificationResult.rows[0]);
     return res.status(201).json({ success: true, message: 'Issue reported successfully.',
-      project_id: project.id, ...counts, data: rows[0] });
+      project_id: project.id, ...counts, data: projectFiles.issueResponse(rows[0]) });
   } catch (error) {
+    // Remove new files while the project lock is still held, before another
+    // submission can reuse their names. Committed/reused files stay intact.
+    if (!committed) await projectFiles.discardIssueFiles(req.files);
     if (transaction) await rollback(client);
     return fail(res, error);
   } finally { client?.release(); }
@@ -172,7 +219,7 @@ exports.getIssueById = async (req, res) => {
   try {
     authenticated(req);
     const { issue } = await locateIssue(req, pool);
-    return res.status(200).json({ success: true, data: issue });
+    return res.status(200).json({ success: true, data: projectFiles.issueResponse(issue) });
   } catch (error) { return fail(res, error); }
 };
 
@@ -252,7 +299,7 @@ async function updateIssue(req, res, resolve = false) {
     client.release(); client = null;
     await publish(req, project, counts, notifications);
     return res.status(200).json({ success: true, message: resolving ? 'Issue resolved successfully.' : 'Issue updated successfully.',
-      project_id: project.id, ...counts, data: detail.rows[0] });
+      project_id: project.id, ...counts, data: projectFiles.issueResponse(detail.rows[0]) });
   } catch (error) {
     if (transaction) await rollback(client);
     return fail(res, error);
@@ -261,6 +308,27 @@ async function updateIssue(req, res, resolve = false) {
 
 exports.updateIssue = (req, res) => updateIssue(req, res);
 exports.resolveIssue = (req, res) => updateIssue(req, res, true);
+
+exports.authorizeIssueImage = async (req, res, next) => {
+  try {
+    authenticated(req);
+    const file = projectFiles.fileReference(req.projectFilePath, 'issues');
+    if (!file || !projectFiles.imageReferences([file.url]).length) throw new service.IssueError(404, 'Issue image not found.');
+    const { rows } = await pool.query('SELECT project_id FROM project_issues WHERE image_paths @> $1::jsonb',
+      [JSON.stringify([file.url])]);
+    if (!rows.length) throw new service.IssueError(404, 'Issue image not found.');
+    for (const row of rows) {
+      try {
+        await service.getProject(row.project_id, req.user);
+        projectFiles.inlineHeaders(res, file);
+        return next();
+      } catch (error) {
+        if (!(error instanceof service.IssueError) || ![403, 404].includes(error.status)) throw error;
+      }
+    }
+    throw new service.IssueError(403, 'You do not have access to this project.');
+  } catch (error) { return fail(res, error); }
+};
 
 exports.deleteIssue = async (req, res) => {
   let client;

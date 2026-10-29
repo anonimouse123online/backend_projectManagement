@@ -1,6 +1,8 @@
 const cron = require('node-cron');
 const pool = require('../db');
+const access = require('./projectAccessService');
 const { generateAIReport } = require('./aiService');
+const { imagesForReport } = require('./reportImageService');
 
 /**
  * Runs every day at 6:00 PM.
@@ -20,7 +22,7 @@ const startScheduler = () => {
  * Finds all task_images rows with status = 'pending' for today
  * and triggers AI report generation for each.
  */
-const processPendingReports = async () => {
+const processPendingReports = async (userId = null) => {
   const date = new Date().toISOString().split('T')[0];
 
   try {
@@ -38,8 +40,9 @@ const processPendingReports = async () => {
        LEFT JOIN projects p ON p.id = t.project_id
        LEFT JOIN users    u ON u.id = t.assignee_id
        WHERE ti.upload_date = $1
-         AND ti.status = 'pending'`,
-      [date]
+         AND ti.status = 'pending'
+         ${userId ? `AND ${access.projectScope('p', 2)}` : ''}`,
+      userId ? [date, userId] : [date]
     );
 
     if (rows.length === 0) {
@@ -68,7 +71,7 @@ const processOneTask = async ({ row, date }) => {
   console.log(`[Scheduler] Processing task: ${task_name} (${task_id})`);
 
   try {
-    const { report, observations } = await generateAIReport({
+    const { report, observations, imagePaths } = await generateAIReport({
       task:       { task_name, project_name, assignee },
       taskId:     task_id,
       date,
@@ -77,14 +80,16 @@ const processOneTask = async ({ row, date }) => {
 
     // Save report to DB
     await pool.query(
-      `INSERT INTO reports (task_id, report_date, observations, report_text, status)
-       VALUES ($1, $2, $3, $4, 'completed')
+      `INSERT INTO reports (task_id, report_date, observations, report_text, status, image_paths)
+       VALUES ($1, $2, $3, $4, 'completed', $5::jsonb)
        ON CONFLICT (task_id, report_date)
        DO UPDATE SET
          observations = $3,
          report_text  = $4,
-         status       = 'completed'`,
-      [task_id, date, JSON.stringify(observations), report]
+         status       = 'completed',
+         image_paths  = $5::jsonb`,
+      [task_id, date, JSON.stringify(observations), report,
+        JSON.stringify(imagesForReport(imagePaths, task_id).map(image => image.url))]
     );
 
     // Mark images as processed

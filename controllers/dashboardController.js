@@ -1,3 +1,4 @@
+const access = require('../services/projectAccessService');
 const pool = require('../db');
 const taskPhases = require('../services/taskPhaseService');
 
@@ -33,20 +34,7 @@ const requireUser = (req, res) => {
 // project_members.project_id -> projects.code
 // ============================================================
 
-const PROJECT_ACCESS_SQL = `
-(
-  p.owner_id = $1
-
-  OR EXISTS (
-    SELECT 1
-
-    FROM project_members pm
-
-    WHERE pm.project_id = p.code
-      AND pm.user_id = $1
-  )
-)
-`;
+const PROJECT_ACCESS_SQL = access.projectScope('p', 1);
 
 
 // ============================================================
@@ -616,7 +604,7 @@ exports.getMonitorItems = async (req, res) => {
         label,
         checked
 
-      FROM monitor_items
+      FROM monitor_items WHERE FALSE
     `;
 
 
@@ -634,7 +622,7 @@ exports.getMonitorItems = async (req, res) => {
 
 
       query += `
-        WHERE label ILIKE $1
+        AND label ILIKE $1
       `;
     }
 
@@ -699,7 +687,7 @@ exports.getRFIs = async (req, res) => {
 
       FROM rfis
 
-      WHERE is_urgent = TRUE
+      WHERE is_urgent = TRUE AND FALSE
     `;
 
 
@@ -787,7 +775,7 @@ exports.getNotes = async (req, res) => {
         status,
         cls
 
-      FROM notes
+      FROM notes WHERE FALSE
     `;
 
 
@@ -805,7 +793,7 @@ exports.getNotes = async (req, res) => {
 
 
       query += `
-        WHERE label ILIKE $1
+        AND label ILIKE $1
       `;
     }
 

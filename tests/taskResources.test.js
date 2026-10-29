@@ -40,14 +40,13 @@ test('JWT task list/detail return scoped materials, equipment and instructions u
   // CTE fixtures exist only inside each SELECT. They create no tables, rows or migrations.
   const cte = (name, fields, rows) => `${name} AS (SELECT * FROM jsonb_to_recordset('${JSON.stringify(rows).replaceAll("'", "''")}') AS fixture(${fields}))`;
   const fixtures = `WITH ${[
-    cte('users', 'id UUID, full_name TEXT, email TEXT', [
-      { id: ids.engineer, full_name: 'Engineer' }, { id: ids.otherEngineer, full_name: 'Other engineer' },
-    ]),
+    cte('users', 'id UUID, full_name TEXT, email TEXT, role TEXT, is_active BOOLEAN',
+      ['engineer','otherEngineer','owner','member','outsider'].map(key => ({ id: ids[key], full_name: key, role: 'Site Engineer', is_active: true }))),
     cte('projects', 'id UUID, name TEXT, code TEXT, owner_id UUID, location TEXT, status TEXT', [
       { id: ids.project, name: 'Fixture project', code: 'FIXTURE', owner_id: ids.owner, location: 'Site', status: 'Ongoing' },
       { id: ids.otherProject, name: 'Private project', code: 'PRIVATE', owner_id: ids.outsider, location: 'Other site', status: 'Ongoing' },
     ]),
-    cte('project_members', 'project_id TEXT, user_id UUID', [{ project_id: 'FIXTURE', user_id: ids.member }]),
+    cte('project_members', 'project_id TEXT, user_id UUID, user_name TEXT', [{ project_id: 'FIXTURE', user_id: ids.member }]),
     cte('tasks', `id UUID, task_name TEXT, phase TEXT, project_id UUID, assignee_id UUID, due_date DATE,
       priority TEXT, status TEXT, progress_pct INTEGER, materials_required TEXT, site_instructions TEXT, subtasks JSONB, created_at TIMESTAMPTZ`, [
       task,

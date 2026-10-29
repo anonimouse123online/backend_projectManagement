@@ -1,4 +1,5 @@
 const pool = require('../db');
+const access = require('../services/projectAccessService');
 const taskPhases = require('../services/taskPhaseService');
 const { generateAIReport } = require('../services/aiService');
 const { processPendingReports } = require('../services/schedulerService');
@@ -28,8 +29,9 @@ exports.getReports = async (req, res) => {
        LEFT JOIN users    u ON u.id = t.assignee_id
        WHERE ($1::uuid IS NULL OR t.project_id = $1::uuid)
          AND ($2::date IS NULL OR r.report_date = $2::date)
+         AND ${access.projectScope('p', 3)}
        ORDER BY r.report_date DESC, t.task_name ASC`,
-      [project_id || null, date || null]
+      [project_id || null, date || null, req.user.id]
     );
 
     res.json({ success: true, data: rows });
@@ -62,8 +64,8 @@ exports.getReportById = async (req, res) => {
        JOIN tasks    t ON t.id = r.task_id
        LEFT JOIN projects p ON p.id = t.project_id
        LEFT JOIN users    u ON u.id = t.assignee_id
-       WHERE r.id = $1`,
-      [id]
+       WHERE r.id = $1 AND ${access.projectScope('p', 2)}`,
+      [id, req.user.id]
     );
 
     if (rows.length === 0)
@@ -91,9 +93,11 @@ exports.getReportsByTask = async (req, res) => {
          r.status,
          r.created_at
        FROM reports r
-       WHERE r.task_id = $1
+       JOIN tasks t ON t.id = r.task_id
+       JOIN projects p ON p.id = t.project_id
+       WHERE r.task_id = $1 AND ${access.projectScope('p', 2)}
        ORDER BY r.report_date DESC`,
-      [taskId]
+      [taskId, req.user.id]
     );
 
     res.json({ success: true, data: rows });
@@ -113,7 +117,7 @@ exports.processReportsNow = async (req, res) => {
     });
 
     // Run in background
-    processPendingReports();
+    processPendingReports(req.user.id);
   } catch (err) {
     console.error('processReportsNow error:', err);
     res.status(500).json({ error: 'Failed to trigger batch processing.' });

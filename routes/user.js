@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+router.use(require('../middlewares/authMiddleware').verifyToken);
 
 const taskController = require('../controllers/taskController');
 const pool = require('../db');
@@ -199,6 +200,10 @@ router.get(
 router.patch(
   '/:id/role',
   requireAdmin,
+  (req, res, next) => {
+    if (req.params.id !== req.user.id) return res.status(403).json({ error: 'Cannot change another account system role. Manage project membership instead.' });
+    next();
+  },
   async (req, res) => {
 
     const { id } =
@@ -329,7 +334,7 @@ router.delete(
 
       // 2. Check if the current user actually owns any projects that this user is a member of
       const ownedProjectsWithTarget = await pool.query(
-        `SELECT pm.id, pm.project_id, p.name AS project_name
+        `SELECT pm.id, pm.project_id, p.id AS project_uuid, p.name AS project_name
          FROM project_members pm
          JOIN projects p ON p.code = pm.project_id
          WHERE pm.user_id = $1::uuid
@@ -353,6 +358,11 @@ router.delete(
          RETURNING *`,
         [id, currentUserId]
       );
+
+      for (const code of new Set(result.rows.map(member => member.project_id))) {
+        const project = ownedProjectsWithTarget.rows.find(member => member.project_id === code);
+        await require('../services/projectIssueService').revokeProjectAccess(req.app.get('io'), { code, id: project.project_uuid });
+      }
 
       console.log(
         `[ROUTE] DELETE /users/${id} by owner ${currentUserId} → removed from ${result.rowCount} project(s)`

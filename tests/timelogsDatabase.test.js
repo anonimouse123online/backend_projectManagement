@@ -17,7 +17,9 @@ for (const idType of ['SERIAL', 'UUID DEFAULT gen_random_uuid()']) {
       await client.query(`CREATE SCHEMA "${schema}"`);
       await client.query(`SET LOCAL search_path TO "${schema}", public`);
       await client.query(`CREATE TABLE projects (id UUID PRIMARY KEY, code TEXT UNIQUE, name TEXT, owner_id UUID);
-        CREATE TABLE project_members (project_id TEXT, user_id UUID);
+        CREATE TABLE project_members (project_id TEXT, user_id UUID, user_name TEXT);
+        CREATE TABLE users (id UUID PRIMARY KEY, email TEXT, role TEXT, is_active BOOLEAN DEFAULT TRUE);
+        CREATE TABLE tasks (id UUID, project_id UUID, assignee_id UUID);
         CREATE TABLE time_logs (id ${idType} PRIMARY KEY, project_name VARCHAR(255) NOT NULL,
           engineer_name VARCHAR(255) NOT NULL, date DATE NOT NULL, work_on_site INTEGER NOT NULL DEFAULT 0,
           supervisors INTEGER NOT NULL DEFAULT 0, sub_contractors INTEGER NOT NULL DEFAULT 0,
@@ -31,10 +33,11 @@ for (const idType of ['SERIAL', 'UUID DEFAULT gen_random_uuid()']) {
       const owner = { id: randomUUID(), role: 'Project Manager' };
       const engineer = { id: randomUUID(), role: 'Site Engineer' };
       const outsider = { id: randomUUID(), role: 'Site Engineer' };
+      for (const user of [owner, engineer, outsider]) await client.query('INSERT INTO users (id,role) VALUES ($1,$2)', [user.id,user.role]);
       for (const [code, name, user] of [['TEST-FENCE', 'MATIMCO FENCE', owner], ['TEST-OTHER', 'Other project', outsider]]) {
         await client.query('INSERT INTO projects VALUES ($1,$2,$3,$4)', [randomUUID(), code, name, user.id]);
       }
-      await client.query('INSERT INTO project_members VALUES ($1,$2)', ['TEST-FENCE', engineer.id]);
+      await client.query('INSERT INTO project_members (project_id,user_id) VALUES ($1,$2)', ['TEST-FENCE', engineer.id]);
       const historical = (await client.query(`INSERT INTO time_logs
         (project_name, engineer_name, date, work_completed, has_incident)
         VALUES ('MATIMCO FENCE', 'Historical Engineer', '2026-10-06', 'Old work record', TRUE) RETURNING *`)).rows[0];

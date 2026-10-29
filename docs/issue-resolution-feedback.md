@@ -148,8 +148,8 @@ successful HTTP response.
 There is no general action/activity audit system in the inspected backend; login-security
 logs are specific to authentication. No separate audit infrastructure was added. Resolution
 records retain issue ID, resolver ID, feedback, and timestamps; issue details provide the
-current issue title and resolver name. Issue routes do not currently support uploads, so
-this endpoint accepts JSON without attachments.
+current issue title and resolver name. Resolution endpoints continue to accept JSON without
+attachments; issue creation supports images as described in [project documents and issue images](project-documents-issue-images.md).
 
 ## Postman / curl
 

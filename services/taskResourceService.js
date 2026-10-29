@@ -22,23 +22,23 @@ function materialItems(value) {
 // Only call with tasks already selected by the controller's existing access checks.
 async function withResources(tasks, db) {
   if (!tasks.length) return [];
-  const projectKeys = [...new Set(tasks.map(task => keyOf(task.project_name)).filter(Boolean))];
+  const projectKeys = [...new Set(tasks.flatMap(task => [keyOf(task.project_name), keyOf(task.project_code)]).filter(Boolean))];
   const { rows } = await db.query(`SELECT r.task_id, LOWER(TRIM(r.project)) AS project_key,
     jsonb_build_object('id', r.id, 'name', r.name, 'category', r.category,
       'quantity', r.quantity, 'unit', r.unit, 'supplier', r.supplier,
       'unitPrice', r.unit_price, 'taskId', r.task_id, 'taskName', r.task_name) AS resource
     FROM resources r
     WHERE r.task_id = ANY($1::uuid[])
-      OR (r.task_id IS NULL AND LOWER(TRIM(r.project)) = ANY($2::text[]))
+      OR (r.task_id IS NULL AND LOWER(TRIM(r.project)) = ANY($2::text[]) AND (SELECT count(*) FROM projects name_match WHERE lower(trim(name_match.name)) = lower(trim(r.project)) OR lower(trim(name_match.code)) = lower(trim(r.project))) = 1)
     ORDER BY r.id`, [tasks.map(task => task.id), projectKeys]);
 
   return tasks.map(task => {
-    const projectKey = keyOf(task.project_name);
+    const projectKeys = [keyOf(task.project_name), keyOf(task.project_code)].filter(Boolean);
     const taskName = keyOf(task.task_name);
-    const unlinked = rows.filter(row => row.task_id == null && row.project_key === projectKey &&
+    const unlinked = rows.filter(row => row.task_id == null && projectKeys.includes(row.project_key) &&
       (!keyOf(row.resource.taskName) || keyOf(row.resource.taskName) === taskName));
     const resources = rows.filter(row => String(row.task_id) === String(task.id) ||
-      (row.task_id == null && row.project_key === projectKey && taskName && keyOf(row.resource.taskName) === taskName))
+      (row.task_id == null && projectKeys.includes(row.project_key) && taskName && keyOf(row.resource.taskName) === taskName))
       .map(row => row.resource);
     const metadata = [...resources, ...unlinked.map(row => row.resource)];
     const allocatedMaterials = materialItems(task.materials_required).map(item => {

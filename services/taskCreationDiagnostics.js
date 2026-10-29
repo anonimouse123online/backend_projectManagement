@@ -14,9 +14,9 @@ function labelOf(sql) {
   if (/^UPDATE resources\b/i.test(statement)) return 'updating materials/resources';
   if (/^UPDATE projects\b/i.test(statement)) return 'synchronizing project progress/status';
   if (/FROM resources\b/i.test(statement)) return 'looking up materials/resources';
+  if (/FROM projects\b/i.test(statement)) return 'checking project access and dates';
   if (/FROM users\b/i.test(statement)) return 'looking up assignee';
   if (/FROM project_members\b/i.test(statement) && !/FROM projects\b/i.test(statement)) return 'checking assignee membership';
-  if (/FROM projects\b/i.test(statement)) return 'checking project access and dates';
   if (/FROM task_phases\b/i.test(statement)) return 'loading created task phases';
   if (/FROM tasks\b/i.test(statement)) return 'reading tasks for project progress';
   return statement.split(' ')[0].toLowerCase() + ' database operation';
