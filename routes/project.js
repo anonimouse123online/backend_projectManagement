@@ -43,15 +43,46 @@ const {
 
 const { uploadDocuments: uploadDocs } = require('../middlewares/projectFileUpload');
 const uploadReportImages = require('../middlewares/projectReportImageUpload');
+const schedule = require('../controllers/scheduleController');
+
+// Both project-code and UUID URLs share the same authorization check. Keep
+// this before schedule handlers so each receives the authorized req.project.
+router.use('/:code', (req, res, next) => {
+  if (['join', 'joined'].includes(req.params.code)) return next();
+  return access.project()(req, res, next);
+});
+
+// Schedule proposal and dependency APIs. Project membership is checked by the
+// router-level guard above; only project managers may alter dependency edges.
+router.get('/:code/schedule', schedule.getSchedule);
+router.get('/:code/schedule/capabilities', schedule.getCapabilities);
+router.get('/:code/schedule/critical-path', schedule.getCriticalPath);
+router.get('/:code/schedule/calendar', schedule.getCalendar);
+router.get('/:code/schedule/dependencies', schedule.getDependencies);
+router.get('/:code/schedule/risk', schedule.getRisk);
+router.post('/:code/schedule/dependencies', access.project(true), schedule.createDependency);
+router.patch('/:code/schedule/dependencies/:id', access.project(true), schedule.updateDependency);
+router.delete('/:code/schedule/dependencies/:id', access.project(true), schedule.deleteDependency);
+router.post('/:code/schedule/simulations', schedule.createSimulation);
+router.post('/:code/schedule/scenarios', schedule.createSimulation);
+router.get('/:code/schedule/scenarios', schedule.listScenarios);
+router.post('/:code/schedule/scenarios/compare', schedule.compareScenarios);
+router.get('/:code/schedule/scenarios/:id', schedule.getScenario);
+router.get('/:code/schedule/baselines', schedule.listBaselines);
+router.post('/:code/schedule/baselines', access.project(true), schedule.createBaseline);
+router.post('/:code/schedule/recovery-options', schedule.recoveryOptions);
+router.get('/:code/schedule/history', schedule.getHistory);
+router.post('/:code/schedule/change-requests', schedule.createChangeRequest);
+router.get('/:code/schedule/change-requests', schedule.listChangeRequests);
+router.get('/:code/schedule/change-requests/:id', schedule.getChangeRequest);
+router.post('/:code/schedule/change-requests/:id/approve', access.project(true), schedule.approveChange);
+router.post('/:code/schedule/change-requests/:id/reject', access.project(true), schedule.rejectChange);
+router.post('/:code/schedule/change-requests/:id/reverse', access.project(true), schedule.reverseChange);
 
 router.get('/',                              getAllProjects);
 router.post('/',                             createProject);
 router.post('/join',                         joinProject);           // ⚠️ before /:code
 router.get('/joined',                        getJoinedProjects);     // ⚠️ before /:code
-router.use('/:code', (req, res, next) => {
-  if (['join', 'joined'].includes(req.params.code)) return next();
-  return access.project()(req, res, next);
-});
 router.get('/:code',                         getProjectByCode);
 router.get('/:code/active-code',             getActiveCode);
 router.patch('/:code/status',                updateProjectStatus);

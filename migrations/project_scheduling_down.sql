@@ -1,0 +1,23 @@
+-- Rollback removes scheduling-only records/objects. Existing task rows and legacy dependencies remain.
+DROP TABLE IF EXISTS schedule_change_history;
+DROP TABLE IF EXISTS schedule_audit_logs;
+DROP TRIGGER IF EXISTS schedule_request_decision_time ON schedule_change_requests;
+DROP FUNCTION IF EXISTS sitepulse_schedule_request_decision_time();
+DROP TABLE IF EXISTS schedule_change_requests;
+DROP TABLE IF EXISTS scenario_task_changes;
+DROP TABLE IF EXISTS schedule_scenarios;
+DROP TABLE IF EXISTS schedule_baseline_tasks;
+DROP TABLE IF EXISTS schedule_baselines;
+DROP TABLE IF EXISTS project_scheduling_calendars;
+DROP TRIGGER IF EXISTS task_dependencies_validate ON task_dependencies;
+DROP FUNCTION IF EXISTS sitepulse_validate_dependency();
+DROP INDEX IF EXISTS task_dependencies_project_idx;
+DROP INDEX IF EXISTS task_dependencies_id_idx;
+ALTER TABLE task_dependencies DROP CONSTRAINT IF EXISTS task_dependencies_same_project_fk;
+ALTER TABLE task_dependencies DROP CONSTRAINT IF EXISTS task_dependencies_type_check;
+ALTER TABLE task_dependencies DROP COLUMN IF EXISTS project_id;
+ALTER TABLE task_dependencies DROP COLUMN IF EXISTS id;
+ALTER TABLE task_dependencies DROP COLUMN IF EXISTS created_by;
+ALTER TABLE task_dependencies DROP COLUMN IF EXISTS updated_at;
+ALTER TABLE task_dependencies DROP COLUMN IF EXISTS lag_working_days;
+ALTER TABLE task_dependencies DROP COLUMN IF EXISTS dependency_type;
