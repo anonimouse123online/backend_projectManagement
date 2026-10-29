@@ -178,7 +178,16 @@ const getAll = async (
       TO_CHAR(
         p.end_date,
         'YYYY-MM-DD'
-      ) AS end_date
+      ) AS end_date,
+
+      TO_CHAR(
+        p.original_end_date,
+        'YYYY-MM-DD'
+      ) AS original_end_date,
+
+      p.project_type,
+      p.construction_method,
+      p.schedule_risk_level
 
 
     FROM projects p
@@ -341,7 +350,16 @@ const getByCode = async (
           TO_CHAR(
             p.end_date,
             'YYYY-MM-DD'
-          ) AS end_date
+          ) AS end_date,
+
+          TO_CHAR(
+            p.original_end_date,
+            'YYYY-MM-DD'
+          ) AS original_end_date,
+
+          p.project_type,
+          p.construction_method,
+          p.schedule_risk_level
 
 
         FROM projects p

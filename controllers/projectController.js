@@ -334,8 +334,45 @@ const updateProjectStatus = async (req, res) => {
   }
 };
 
+// ============================================================
+// TIMELINE FEASIBILITY RULES & ENGINE
+//
+// Industry benchmarks:
+// - ASTM C31 / DPWH 14-28 days concrete curing
+// - Sequential phase dependencies & finishing
+// ============================================================
+const FEASIBILITY_RULES = {
+  residential:     { traditional: 90,  modular_prefab: 21, renovation: 14 },
+  commercial:      { traditional: 180, modular_prefab: 60, renovation: 30 },
+  road_civil:      { traditional: 60,  modular_prefab: 30, renovation: 14 },
+  interior_fitout: { traditional: 14,  modular_prefab: 7,  renovation: 7  },
+  minor_repairs:   { traditional: 5,   modular_prefab: 3,  renovation: 3  },
+};
+
+const calculateFeasibilityRisk = (projectType, constructionMethod, startDate, endDate) => {
+  if (!startDate || !endDate) return null;
+  const startMs = new Date(startDate).getTime();
+  const endMs   = new Date(endDate).getTime();
+  if (isNaN(startMs) || isNaN(endMs) || endMs <= startMs) return null;
+
+  const durationDays = Math.round((endMs - startMs) / (1000 * 60 * 60 * 24));
+  const method = constructionMethod || 'traditional';
+  const typeRules = FEASIBILITY_RULES[projectType];
+  if (!typeRules) return null;
+
+  const minDays = typeRules[method] || typeRules.traditional;
+  if (durationDays < minDays) {
+    const ratio = durationDays / minDays;
+    if (ratio < 0.25) return 'critical';
+    if (ratio < 0.5)  return 'high';
+    return 'moderate';
+  }
+  return 'low';
+};
+
 // Update only projects.end_date. Keep task schedules untouched and report any
 // task deadlines that would fall beyond the proposed project deadline.
+// Also dynamically recalculates and updates the schedule_risk_level.
 const updateProjectDueDate = async (req, res) => {
   if (authRequired(req, res)) return;
   const { code } = req.params;
@@ -354,7 +391,9 @@ const updateProjectDueDate = async (req, res) => {
     client = await pool.connect();
     await client.query('BEGIN');
     const { rows: projects } = await client.query(
-      `SELECT code, start_date::text AS start_date, end_date::text AS end_date
+      `SELECT code, name, start_date::text AS start_date, end_date::text AS end_date,
+              original_end_date::text AS original_end_date,
+              project_type, construction_method, schedule_risk_level
        FROM projects WHERE code = $1 FOR UPDATE`, [code]);
     if (!projects.length) {
       await client.query('ROLLBACK');
@@ -380,12 +419,62 @@ const updateProjectDueDate = async (req, res) => {
     }
     let updated = project;
     if (dueDate !== project.end_date) {
+      let projectType = project.project_type;
+      if (!projectType && project.name) {
+        if (/house|residential|apartment|condo/i.test(project.name)) projectType = 'residential';
+        else if (/commercial|office|mall|building|hospital/i.test(project.name)) projectType = 'commercial';
+        else if (/road|drainage|bridge|highway/i.test(project.name)) projectType = 'road_civil';
+        else if (/fitout|fit-out|interior/i.test(project.name)) projectType = 'interior_fitout';
+        else if (/repair|fix|repaint/i.test(project.name)) projectType = 'minor_repairs';
+      }
+
+      const newScheduleRiskLevel = calculateFeasibilityRisk(
+        projectType,
+        project.construction_method,
+        project.start_date,
+        dueDate
+      );
+
+      const updateFields = ['end_date = $1::date', 'updated_at = NOW()'];
+      const updateParams = [dueDate, code];
+
+      if (newScheduleRiskLevel !== null) {
+        updateParams.push(newScheduleRiskLevel);
+        updateFields.push(`schedule_risk_level = $${updateParams.length}`);
+      }
+
+      if (!project.project_type && projectType) {
+        updateParams.push(projectType);
+        updateFields.push(`project_type = $${updateParams.length}`);
+      }
+
       const result = await client.query(
-        `UPDATE projects SET end_date = $1::date, updated_at = NOW() WHERE code = $2
-         RETURNING code, start_date::text AS "startDate", end_date::text AS "dueDate"`, [dueDate, code]);
+        `UPDATE projects
+         SET ${updateFields.join(', ')}
+         WHERE code = $2
+         RETURNING
+           code,
+           start_date::text AS "startDate",
+           end_date::text AS "dueDate",
+           end_date::text AS end_date,
+           original_end_date::text AS original_end_date,
+           schedule_risk_level,
+           project_type,
+           construction_method`,
+        updateParams
+      );
       updated = result.rows[0];
     } else {
-      updated = { code: project.code, startDate: project.start_date, dueDate: project.end_date };
+      updated = {
+        code: project.code,
+        startDate: project.start_date,
+        dueDate: project.end_date,
+        end_date: project.end_date,
+        original_end_date: project.original_end_date || project.end_date,
+        schedule_risk_level: project.schedule_risk_level,
+        project_type: project.project_type,
+        construction_method: project.construction_method
+      };
     }
     await client.query('COMMIT');
     return res.status(200).json({ success: true, message: 'Project due date updated successfully', data: updated });
@@ -476,8 +565,74 @@ const createProject = async (req, res) => {
       start_date,
       end_date,
       phase,
-      status
+      status,
+      project_type,
+      construction_method,
+      schedule_risk_acknowledged
     } = req.body;
+
+
+    // ============================================================
+    // TIMELINE FEASIBILITY VALIDATION
+    //
+    // Minimum durations (in calendar days) by project type and
+    // construction method, based on industry standards:
+    //  - Concrete curing: 14-28 days (ASTM C31 / DPWH)
+    //  - Sequential phase dependencies
+    //  - MEP rough-in & finishing lead times
+    // ============================================================
+
+    const FEASIBILITY_RULES = {
+      residential:     { traditional: 90,  modular_prefab: 21, renovation: 14 },
+      commercial:      { traditional: 180, modular_prefab: 60, renovation: 30 },
+      road_civil:      { traditional: 60,  modular_prefab: 30, renovation: 14 },
+      interior_fitout: { traditional: 14,  modular_prefab: 7,  renovation: 7  },
+      minor_repairs:   { traditional: 5,   modular_prefab: 3,  renovation: 3  },
+    };
+
+    let scheduleRiskLevel = null;
+
+    if (project_type && start_date && end_date) {
+      const startMs = new Date(start_date).getTime();
+      const endMs   = new Date(end_date).getTime();
+      const durationDays = Math.round((endMs - startMs) / (1000 * 60 * 60 * 24));
+
+      const method = construction_method || 'traditional';
+      const typeRules = FEASIBILITY_RULES[project_type];
+
+      if (typeRules) {
+        const minDays = typeRules[method] || typeRules.traditional;
+
+        if (durationDays < minDays) {
+          // Determine risk severity
+          const ratio = durationDays / minDays;
+          if (ratio < 0.25)      scheduleRiskLevel = 'critical';
+          else if (ratio < 0.5)  scheduleRiskLevel = 'high';
+          else if (ratio < 0.75) scheduleRiskLevel = 'moderate';
+          else                   scheduleRiskLevel = 'moderate';
+
+          // Block creation if user has NOT acknowledged the risk
+          if (!schedule_risk_acknowledged) {
+            return res.status(422).json({
+              success: false,
+              feasibility_warning: true,
+              schedule_risk_level: scheduleRiskLevel,
+              duration_days: durationDays,
+              minimum_days: minDays,
+              project_type,
+              construction_method: method,
+              message:
+                `Timeline alert: ${durationDays}-day schedule for a ` +
+                `${project_type.replace('_', ' ')} project (${method.replace('_', '/')}) ` +
+                `is below the recommended minimum of ${minDays} days. ` +
+                `Acknowledge the schedule risk to proceed.`
+            });
+          }
+        } else {
+          scheduleRiskLevel = 'low';
+        }
+      }
+    }
 
 
     // ============================================================
@@ -544,6 +699,11 @@ const createProject = async (req, res) => {
     // CREATE PROJECT
     // ============================================================
 
+    const cleanProjectType = project_type && typeof project_type === 'string'
+      ? project_type.trim() : null;
+    const cleanConstructionMethod = construction_method && typeof construction_method === 'string'
+      ? construction_method.trim() : null;
+
     const { rows } = await pool.query(
       `
       INSERT INTO projects
@@ -556,9 +716,13 @@ const createProject = async (req, res) => {
         budget,
         start_date,
         end_date,
+        original_end_date,
         phase,
         status,
-        owner_id
+        owner_id,
+        project_type,
+        construction_method,
+        schedule_risk_level
       )
 
       VALUES
@@ -573,7 +737,11 @@ const createProject = async (req, res) => {
         $8,
         $9,
         $10,
-        $11
+        $11,
+        $12,
+        $13,
+        $14,
+        $15
       )
 
       RETURNING
@@ -587,6 +755,9 @@ const createProject = async (req, res) => {
         phase,
         status,
         owner_id,
+        project_type,
+        construction_method,
+        schedule_risk_level,
 
         TO_CHAR(
           start_date,
@@ -596,7 +767,12 @@ const createProject = async (req, res) => {
         TO_CHAR(
           end_date,
           'YYYY-MM-DD'
-        ) AS end_date
+        ) AS end_date,
+
+        TO_CHAR(
+          original_end_date,
+          'YYYY-MM-DD'
+        ) AS original_end_date
       `,
       [
         finalCode,
@@ -607,9 +783,13 @@ const createProject = async (req, res) => {
         projectBudget,
         start_date,
         end_date,
+        end_date,
         projectPhase,
         projectStatus,
-        req.user.id
+        req.user.id,
+        cleanProjectType,
+        cleanConstructionMethod,
+        scheduleRiskLevel
       ]
     );
 

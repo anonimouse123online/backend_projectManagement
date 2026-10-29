@@ -17,3 +17,7 @@ firenaseAdmin.ksc
 
 # Uploads
 uploads/
+
+# OS metadata
+.DS_Store
+*.DS_Store
