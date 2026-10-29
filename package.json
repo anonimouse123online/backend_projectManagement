@@ -11,6 +11,7 @@
     "test:timelogs": "node --test tests/timelogs.test.js",
     "test:timelogs:db": "node --test tests/timelogsDatabase.test.js",
     "migrate:task-work-status": "node migrations/task_work_status.js",
+    "migrate:project-due-date": "node migrations/project_due_date.js",
     "test:task-work-status": "node --test tests/taskWorkStatus.test.js",
     "test:task-work-status:db": "node --test tests/taskWorkStatusDatabase.test.js tests/taskWorkStatusMigration.test.js",
     "migrate:project-issues": "node migrations/project_issue_alerts.js",
