@@ -55,10 +55,18 @@ exports.getResources = async (req, res) => {
   }
 };
 
+const isResourceStatusGenerated = async (db = pool) => {
+  const resourceColumn = await db.query(`SELECT n.nspname AS schema, c.relname AS table,
+    a.attgenerated <> '' AS is_generated FROM pg_attribute a
+    JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE a.attrelid = 'resources'::regclass AND a.attname = 'status' AND NOT a.attisdropped`);
+  return resourceColumn.rows[0]?.is_generated === true;
+};
+
 exports.createResource = async (req, res) => {
   try {
     const { name, supplier, category, quantity, unit, minThreshold, unitPrice, project, taskId, taskName } = req.body;
-    const price = money.moneyValue(unitPrice, 'unitPrice');
+    const price = money.moneyValue(unitPrice !== undefined && unitPrice !== null && unitPrice !== '' ? unitPrice : 0, 'unitPrice');
     const resourceQuantity = money.quantityValue(quantity ?? 0, 'quantity');
     const targetTaskId = taskId && taskId !== 'none' && taskId !== '' ? taskId : null;
     let targetTaskName = taskName && taskName.trim() ? taskName.trim() : null;
@@ -83,17 +91,31 @@ exports.createResource = async (req, res) => {
       computedStatus = 'In stock';
     }
 
-    const { rows } = await pool.query(
-      `INSERT INTO resources (name, supplier, category, quantity, unit, min_threshold, unit_price, project, task_id, task_name, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-       RETURNING
-         id, name, supplier, category,
-         quantity, unit, min_threshold AS "minThreshold",
-         unit_price AS "unitPrice", project, status,
-         task_id AS "taskId", task_name AS "taskName",
-         TO_CHAR(updated_at, 'Mon DD, YYYY') AS "updatedAt"`,
-      [name, supplier, category, resourceQuantity, unit, threshNum, price, project, targetTaskId, targetTaskName, computedStatus]
-    );
+    const generatedStatus = await isResourceStatusGenerated(pool);
+
+    const insertSql = generatedStatus
+      ? `INSERT INTO resources (name, supplier, category, quantity, unit, min_threshold, unit_price, project, task_id, task_name)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING
+           id, name, supplier, category,
+           quantity, unit, min_threshold AS "minThreshold",
+           unit_price AS "unitPrice", project, status,
+           task_id AS "taskId", task_name AS "taskName",
+           TO_CHAR(updated_at, 'Mon DD, YYYY') AS "updatedAt"`
+      : `INSERT INTO resources (name, supplier, category, quantity, unit, min_threshold, unit_price, project, task_id, task_name, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         RETURNING
+           id, name, supplier, category,
+           quantity, unit, min_threshold AS "minThreshold",
+           unit_price AS "unitPrice", project, status,
+           task_id AS "taskId", task_name AS "taskName",
+           TO_CHAR(updated_at, 'Mon DD, YYYY') AS "updatedAt"`;
+
+    const insertParams = generatedStatus
+      ? [name, supplier, category, resourceQuantity, unit, threshNum, price, project, targetTaskId, targetTaskName]
+      : [name, supplier, category, resourceQuantity, unit, threshNum, price, project, targetTaskId, targetTaskName, computedStatus];
+
+    const { rows } = await pool.query(insertSql, insertParams);
 
     // If assigned to a task, sync/append this material to the task's materials_required
     if (targetTaskId) {
@@ -123,7 +145,7 @@ exports.updateResource = async (req, res) => {
   try {
     const { id } = req.params;
     const { name, supplier, category, quantity, unit, minThreshold, unitPrice, project, taskId, taskName } = req.body;
-    const price = money.moneyValue(unitPrice, 'unitPrice');
+    const price = money.moneyValue(unitPrice !== undefined && unitPrice !== null && unitPrice !== '' ? unitPrice : 0, 'unitPrice');
     const resourceQuantity = money.quantityValue(quantity ?? 0, 'quantity');
     const targetTaskId = taskId && taskId !== 'none' && taskId !== '' ? taskId : null;
     const targetTaskName = taskName && taskName.trim() ? taskName.trim() : null;
@@ -141,19 +163,35 @@ exports.updateResource = async (req, res) => {
       computedStatus = 'In stock';
     }
 
-    const { rows } = await pool.query(
-      `UPDATE resources
-       SET name=$1, supplier=$2, category=$3, quantity=$4, unit=$5,
-           min_threshold=$6, unit_price=$7, project=$8, task_id=$9, task_name=$10, status=$11, updated_at=NOW()
-       WHERE id::text = $12::text
-       RETURNING
-         id, name, supplier, category,
-         quantity, unit, min_threshold AS "minThreshold",
-         unit_price AS "unitPrice", project, status,
-         task_id AS "taskId", task_name AS "taskName",
-         TO_CHAR(updated_at, 'Mon DD, YYYY') AS "updatedAt"`,
-      [name, supplier, category, resourceQuantity, unit, threshNum, price, project, targetTaskId, targetTaskName, computedStatus, id]
-    );
+    const generatedStatus = await isResourceStatusGenerated(pool);
+
+    const updateSql = generatedStatus
+      ? `UPDATE resources
+         SET name=$1, supplier=$2, category=$3, quantity=$4, unit=$5,
+             min_threshold=$6, unit_price=$7, project=$8, task_id=$9, task_name=$10, updated_at=NOW()
+         WHERE id::text = $11::text
+         RETURNING
+           id, name, supplier, category,
+           quantity, unit, min_threshold AS "minThreshold",
+           unit_price AS "unitPrice", project, status,
+           task_id AS "taskId", task_name AS "taskName",
+           TO_CHAR(updated_at, 'Mon DD, YYYY') AS "updatedAt"`
+      : `UPDATE resources
+         SET name=$1, supplier=$2, category=$3, quantity=$4, unit=$5,
+             min_threshold=$6, unit_price=$7, project=$8, task_id=$9, task_name=$10, status=$11, updated_at=NOW()
+         WHERE id::text = $12::text
+         RETURNING
+           id, name, supplier, category,
+           quantity, unit, min_threshold AS "minThreshold",
+           unit_price AS "unitPrice", project, status,
+           task_id AS "taskId", task_name AS "taskName",
+           TO_CHAR(updated_at, 'Mon DD, YYYY') AS "updatedAt"`;
+
+    const updateParams = generatedStatus
+      ? [name, supplier, category, resourceQuantity, unit, threshNum, price, project, targetTaskId, targetTaskName, id]
+      : [name, supplier, category, resourceQuantity, unit, threshNum, price, project, targetTaskId, targetTaskName, computedStatus, id];
+
+    const { rows } = await pool.query(updateSql, updateParams);
     if (!rows.length) return res.status(404).json({ error: 'Resource not found.' });
     res.json({ success: true, data: rows[0] });
   } catch (err) {

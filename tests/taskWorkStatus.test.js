@@ -50,6 +50,14 @@ test('old full-array payloads preserve omitted status/progress and still support
   assert.throws(() => service.mergeSubtasks(current, [{ ...current[0], status: 'working123' }]), { status: 400 });
 });
 
+test('mergeSubtasks preserves and updates percentage progress on subtasks', () => {
+  const current = [{ id: 'sub-1', title: 'kalota', status: 'pending', progress: 0, completed: false }];
+  const updated = service.mergeSubtasks(current, [{ id: 'sub-1', title: 'kalota', status: 'ongoing', progress: 40, completed: false }]);
+  assert.equal(updated[0].progress, 40);
+  assert.equal(updated[0].status, 'ongoing');
+  assert.equal(updated[0].completed, false);
+});
+
 test('invalid status/progress updates and unauthenticated requests fail before any database write', async () => {
   const connect = mock.method(pool, 'connect', async () => { throw new Error('Unexpected connection'); });
   const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };

@@ -16,10 +16,14 @@ const resource = guard(async req => {
   let target;
   if (taskId && taskId !== 'none') {
     target = (await access.getTask(taskId, req.user)).project;
-    if (![target.name, target.code].includes(project)) throw new access.AccessError(400, 'Task and project must match.');
+    const cleanProject = String(project || '').trim().toLowerCase();
+    if (![(target.name || '').trim().toLowerCase(), (target.code || '').trim().toLowerCase()].includes(cleanProject)) {
+      throw new access.AccessError(400, 'Task and project must match.');
+    }
   } else {
+    const cleanProject = String(project || '').trim();
     const { rows } = await pool.query(`SELECT id FROM projects WHERE
-      lower(trim(code)) = lower(trim($1)) OR lower(trim(name)) = lower(trim($1))`, [project]);
+      lower(trim(code)) = lower(trim($1)) OR lower(trim(name)) = lower(trim($1)) OR id::text = $1`, [cleanProject]);
     if (rows.length !== 1) throw new access.AccessError(400, 'Select an unambiguous project code.');
     target = await access.getProject(rows[0].id, req.user);
   }

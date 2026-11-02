@@ -184,16 +184,20 @@ async function saveSubtasks({ taskId, user, subtasks }, pool, getAccessibleTask)
     const saved = Array.isArray(current.subtasks) ? current.subtasks : [];
     const merged = mergeSubtasks(saved, subtasks);
     const existing = new Map(saved.map(item => [String(item.id), item]));
-    const completionChanged = saved.length !== merged.length || merged.some(item => existing.get(item.id)?.completed !== item.completed);
-    const pct = completionChanged ? (merged.length ? Math.round(merged.filter(item => item.completed).length / merged.length * 100) : 0)
-      : current.progress_pct;
-    const status = completionChanged ? (pct === 100 ? 'Completed' : pct > 0 ? 'ongoing' : 'pending') : current.status;
+    const progressChanged = saved.length !== merged.length || merged.some(item => {
+      const prev = existing.get(item.id);
+      return !prev || prev.completed !== item.completed || Number(prev.progress ?? prev.progress_pct ?? 0) !== Number(item.progress ?? item.progress_pct ?? 0);
+    });
+    const totalProgress = merged.reduce((acc, item) => acc + (item.completed ? 100 : Math.max(0, Math.min(100, Number(item.progress ?? item.progress_pct ?? 0)))), 0);
+    const avgPct = merged.length ? Math.round(totalProgress / merged.length) : (current.progress_pct ?? 0);
+    const pct = progressChanged ? avgPct : (current.progress_pct ?? 0);
+    const status = progressChanged ? (pct >= 100 ? 'Completed' : pct > 0 ? databaseStatus('ongoing') : databaseStatus('pending')) : current.status;
     const { rows } = await client.query(`UPDATE tasks SET subtasks = $1::jsonb,
       progress_pct = $2, status = $3, updated_at = NOW() WHERE id = $4::uuid RETURNING *`,
     [JSON.stringify(merged), pct, status, taskId]);
     const data = await taskPhases.withPhases(rows[0], client);
     await client.query('COMMIT'); transaction = false;
-    return { data: taskFields(data), completionChanged };
+    return { data: taskFields(data), completionChanged: progressChanged };
   } catch (error) {
     if (transaction) {
       try { await client.query('ROLLBACK'); }

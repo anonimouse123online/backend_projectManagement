@@ -811,8 +811,8 @@ const syncProjectProgress = async (projectId, db = pool) => {
       const subs = Array.isArray(t.subtasks) ? t.subtasks : [];
 
       if (subs.length > 0) {
-        const done = subs.filter((s) => s && s.completed).length;
-        totalTaskScore += done / subs.length;
+        const subScore = subs.reduce((acc, s) => acc + (s && s.completed ? 1 : Math.max(0, Math.min(100, Number(s?.progress ?? s?.progress_pct ?? 0))) / 100), 0);
+        totalTaskScore += subScore / subs.length;
       } else {
         if (isCompleted) {
           totalTaskScore += 1;
@@ -2566,7 +2566,6 @@ exports.uploadTaskReport = async function(req, res) {
     console.error(err);
     console.error('════════════════════════════════════════');
 
-
     return res.status(err.status || 500).json({
 
       success: false,
@@ -2580,3 +2579,243 @@ exports.uploadTaskReport = async function(req, res) {
     });
   }
 };
+
+
+// ============================================================
+// GET ASSIGNEE WORKLOAD & CONFLICT DETECTION
+// GET /tasks/workload?assignee_id=...&start_date=...&due_date=...&exclude_task_id=...
+// ============================================================
+exports.getAssigneeWorkload = async function(req, res) {
+  if (!requireAuth(req, res)) {
+    return;
+  }
+
+  const assigneeId = (req.query.assigneeId || req.query.assignee_id || '').trim();
+  const startDate = (req.query.startDate || req.query.start_date || '').trim();
+  const dueDate = (req.query.dueDate || req.query.due_date || '').trim();
+  const excludeTaskId = (req.query.excludeTaskId || req.query.exclude_task_id || '').trim() || null;
+  const currentProjectId = (req.query.projectId || req.query.project_id || '').trim() || null;
+
+  if (!assigneeId) {
+    return res.status(400).json({
+      success: false,
+      error: 'Assignee ID is required.'
+    });
+  }
+
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!uuidRegex.test(assigneeId)) {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid assignee ID format.'
+    });
+  }
+
+  if (excludeTaskId && !uuidRegex.test(excludeTaskId)) {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid exclude task ID format.'
+    });
+  }
+
+  try {
+    // 1. Fetch user information
+    const userRes = await pool.query(
+      `SELECT id, full_name, email, role FROM users WHERE id = $1::uuid LIMIT 1`,
+      [assigneeId]
+    );
+
+    if (userRes.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Engineer / Assignee not found.'
+      });
+    }
+
+    const assignee = userRes.rows[0];
+
+    // 2. Validate and normalize dates
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    let effectiveStart = dateRegex.test(startDate) ? startDate : null;
+    let effectiveDue = dateRegex.test(dueDate) ? dueDate : null;
+
+    if (effectiveStart && effectiveDue && effectiveStart > effectiveDue) {
+      const temp = effectiveStart;
+      effectiveStart = effectiveDue;
+      effectiveDue = temp;
+    }
+
+    let query;
+    let params;
+
+    if (effectiveStart || effectiveDue) {
+      const windowStart = effectiveStart || effectiveDue;
+      const windowEnd = effectiveDue || effectiveStart;
+
+      query = `
+        SELECT
+          t.id,
+          t.task_name,
+          t.start_date::text AS start_date,
+          t.due_date::text AS due_date,
+          t.priority,
+          t.status,
+          COALESCE(t.progress_pct, 0) AS progress_pct,
+          t.estimated_duration_days,
+          p.id AS project_id,
+          p.code AS project_code,
+          p.name AS project_name
+        FROM tasks t
+        LEFT JOIN projects p ON p.id = t.project_id
+        WHERE t.assignee_id = $1::uuid
+          AND LOWER(TRIM(COALESCE(t.status, 'pending'))) NOT IN ('completed', 'done', 'cancelled', 'resolved')
+          AND t.due_date IS NOT NULL
+          AND ($2::uuid IS NULL OR t.id <> $2::uuid)
+          AND COALESCE(t.start_date, t.due_date) <= $3::date
+          AND t.due_date >= $4::date
+        ORDER BY t.start_date ASC NULLS LAST, t.due_date ASC
+      `;
+      params = [assigneeId, excludeTaskId, windowEnd, windowStart];
+    } else {
+      query = `
+        SELECT
+          t.id,
+          t.task_name,
+          t.start_date::text AS start_date,
+          t.due_date::text AS due_date,
+          t.priority,
+          t.status,
+          COALESCE(t.progress_pct, 0) AS progress_pct,
+          t.estimated_duration_days,
+          p.id AS project_id,
+          p.code AS project_code,
+          p.name AS project_name
+        FROM tasks t
+        LEFT JOIN projects p ON p.id = t.project_id
+        WHERE t.assignee_id = $1::uuid
+          AND LOWER(TRIM(COALESCE(t.status, 'pending'))) NOT IN ('completed', 'done', 'cancelled', 'resolved')
+          AND t.due_date IS NOT NULL
+          AND ($2::uuid IS NULL OR t.id <> $2::uuid)
+        ORDER BY t.due_date ASC
+        LIMIT 20
+      `;
+      params = [assigneeId, excludeTaskId];
+    }
+
+    const { rows: conflictingTasks } = await pool.query(query, params);
+
+    // 3. Day-by-day concurrency analysis
+    const dailyBreakdown = [];
+    let peakConcurrency = 0;
+
+    if (effectiveStart && effectiveDue) {
+      const cur = new Date(`${effectiveStart}T00:00:00Z`);
+      const end = new Date(`${effectiveDue}T00:00:00Z`);
+      const maxDays = 60;
+      let dayCount = 0;
+
+      while (cur <= end && dayCount < maxDays) {
+        const dayStr = cur.toISOString().slice(0, 10);
+        const dayTasks = conflictingTasks.filter(t => {
+          const tStart = t.start_date || t.due_date;
+          const tDue = t.due_date;
+          return tStart <= dayStr && tDue >= dayStr;
+        });
+
+        if (dayTasks.length > 0) {
+          dailyBreakdown.push({
+            date: dayStr,
+            taskCount: dayTasks.length,
+            tasks: dayTasks.map(t => ({
+              id: t.id,
+              taskName: t.task_name,
+              projectName: t.project_name,
+              projectCode: t.project_code,
+              priority: t.priority,
+              status: t.status
+            }))
+          });
+          if (dayTasks.length > peakConcurrency) {
+            peakConcurrency = dayTasks.length;
+          }
+        }
+        cur.setUTCDate(cur.getUTCDate() + 1);
+        dayCount++;
+      }
+    } else {
+      peakConcurrency = conflictingTasks.length > 0 ? 1 : 0;
+    }
+
+    if (conflictingTasks.length > 0 && peakConcurrency === 0) {
+      peakConcurrency = conflictingTasks.length;
+    }
+
+    // 4. Determine workload level and advisory
+    let workloadLevel = 'optimal';
+    let statusLabel = 'Available';
+    let badgeColor = 'green';
+    let advisory = 'Engineer has full capacity with no overlapping active tasks scheduled for this period.';
+
+    if (peakConcurrency === 1) {
+      workloadLevel = 'moderate';
+      statusLabel = '1 Concurrent Task (Moderate Load)';
+      badgeColor = 'amber';
+      advisory = 'Engineer has 1 concurrent task. Standard multi-tasking is acceptable for inspections, reporting, or supervisory tasks, but ensure site presence requirements don’t conflict.';
+    } else if (peakConcurrency === 2) {
+      workloadLevel = 'heavy';
+      statusLabel = '2 Concurrent Tasks (High Workload)';
+      badgeColor = 'orange';
+      advisory = 'Caution: Engineer is scheduled for 2 overlapping tasks on these dates. Managing multiple concurrent tasks on the same day may split site attention and risk delays. Consider staggering dates or reallocating to another engineer.';
+    } else if (peakConcurrency >= 3) {
+      workloadLevel = 'critical';
+      statusLabel = `${peakConcurrency} Concurrent Tasks (Overloaded)`;
+      badgeColor = 'red';
+      advisory = `Warning: Engineer has ${peakConcurrency} active tasks on overlapping dates. Heavy multi-tasking across construction projects significantly increases safety and schedule risks. Staggering or reassigning is strongly advised.`;
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        assignee: {
+          id: assignee.id,
+          name: assignee.full_name || assignee.email,
+          email: assignee.email,
+          role: assignee.role
+        },
+        dateRange: {
+          startDate: effectiveStart,
+          dueDate: effectiveDue
+        },
+        conflictCount: conflictingTasks.length,
+        peakConcurrency,
+        workloadLevel,
+        statusLabel,
+        badgeColor,
+        advisory,
+        canProceed: true,
+        conflictingTasks: conflictingTasks.map(t => ({
+          id: t.id,
+          taskName: t.task_name,
+          startDate: t.start_date,
+          dueDate: t.due_date,
+          priority: t.priority,
+          status: t.status,
+          projectId: t.project_id,
+          projectCode: t.project_code,
+          projectName: t.project_name,
+          progressPct: t.progress_pct,
+          isCurrentProject: Boolean(currentProjectId && (t.project_id === currentProjectId || t.project_code === currentProjectId))
+        })),
+        dailyBreakdown
+      }
+    });
+
+  } catch (error) {
+    console.error('[GET /tasks/workload] Error:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to evaluate engineer workload.'
+    });
+  }
+};
+

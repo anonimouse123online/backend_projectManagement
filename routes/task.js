@@ -22,6 +22,11 @@ router.get(
   taskController.getUsers
 );
 
+router.get(
+  '/workload',
+  taskController.getAssigneeWorkload
+);
+
 
 // ============================================================
 // CREATE TASK
@@ -35,7 +40,7 @@ router.post(
 
 // No generic edit route existed; use the existing task resource URL.
 router.use('/:id', (req, res, next) => {
-  if (req.params.id === 'users') return next();
+  if (req.params.id === 'users' || req.params.id === 'workload') return next();
   const manage = req.method !== 'GET' && (req.path === '/' || req.path === '/assign');
   return access.task(manage ? 'manage' : req.method === 'GET' ? 'read' : 'work')(req, res, next);
 });

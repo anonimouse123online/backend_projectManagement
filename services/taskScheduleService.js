@@ -123,6 +123,7 @@ async function validateSchedule({ db, project, taskId = null, taskName = 'This t
         AND ($3::uuid IS NULL OR id <> $3::uuid)
         AND COALESCE(start_date, due_date) <= $4::date AND due_date >= $5::date LIMIT 5`,
     [project.id, assigneeId, taskId, dueDate, startDate]);
+    result.overlappingTasks = overlap.rows;
     for (const row of overlap.rows) warn(`Assigned person also has overlapping task “${row.task_name}” (due ${row.due_date}); review resource availability.`);
   }
 

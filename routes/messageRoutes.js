@@ -156,6 +156,13 @@ router.get(
   messageController.getConversations
 );
 
+// Get total unread messages count
+router.get(
+  '/unread-count',
+  verifyToken,
+  messageController.getUnreadCount
+);
+
 
 // Create/open conversation
 router.post(

@@ -1186,3 +1186,51 @@ exports.getConversationMembers = async (req, res) => {
     });
   }
 };
+
+
+// ============================================================
+// GET TOTAL UNREAD COUNT
+// GET /messages/unread-count
+// ============================================================
+exports.getUnreadCount = async (req, res) => {
+  try {
+    const userId = getUserId(req);
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized'
+      });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT COUNT(*)::INTEGER AS unread_count
+      FROM messages m
+      JOIN conversation_members cm
+        ON cm.conversation_id = m.conversation_id
+       AND cm.user_id = $1
+      WHERE m.sender_id != $1
+        AND m.is_read = FALSE
+      `,
+      [userId]
+    );
+
+    const unreadCount = Number(result.rows[0]?.unread_count || 0);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        unreadCount
+      },
+      unreadCount
+    });
+
+  } catch (error) {
+    console.error('GET UNREAD COUNT ERROR:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch unread count'
+    });
+  }
+};
