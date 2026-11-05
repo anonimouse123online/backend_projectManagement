@@ -52,7 +52,19 @@ function imageReferences(imagePaths) {
 function issueResponse(issue) {
   if (!issue) return issue;
   const { image_paths, ...fields } = issue;
-  return { ...fields, images: imageReferences(image_paths) };
+  const resolution = fields.resolution || null;
+  return {
+    ...fields,
+    ...(resolution ? {
+      resolution_summary: resolution.resolution_summary ?? fields.resolution_summary ?? null,
+      resolution_steps: resolution.resolution_steps ?? fields.resolution_steps ?? null,
+      final_remarks: resolution.final_remarks ?? fields.final_remarks ?? null,
+      resolved_by_name: resolution.resolved_by?.name ?? fields.resolved_by_name ?? null,
+      resolved_by: resolution.resolved_by ?? fields.resolved_by ?? null,
+      resolved_at: resolution.resolved_at ?? fields.resolved_at ?? null,
+    } : {}),
+    images: imageReferences(image_paths),
+  };
 }
 
 function inlineHeaders(res, file) {

@@ -108,4 +108,29 @@ test('the issue socket namespace requires a valid JWT and joins only the authent
   }
 });
 
+test('unresolved issue count query uses project scope and aggregates accurately', async () => {
+  const query = mock.method(pool, 'query', async (sql, params) => {
+    assert.match(sql, /unresolved_count/);
+    assert.match(sql, /status IN \('open', 'in_progress'\)/);
+    assert.equal(params[0], 'test-user-uuid');
+    return { rows: [{ unresolved_count: 5, projects_with_issues_count: 2 }] };
+  });
+  try {
+    const issuesRouter = require('../routes/issuesRoutes');
+    const route = issuesRouter.stack.find(s => s.route?.path === '/issues/unresolved-count');
+    assert.ok(route, 'unresolved-count route should exist');
+    const handler = route.route.stack[0].handle;
+    const res = {
+      status(code) { this.code = code; return this; },
+      json(body) { this.body = body; return this; }
+    };
+    await handler({ user: { id: 'test-user-uuid' } }, res);
+    assert.equal(res.code, 200);
+    assert.equal(res.body.unresolvedCount, 5);
+    assert.equal(res.body.projectsWithIssuesCount, 2);
+  } finally {
+    mock.restoreAll();
+  }
+});
+
 test.after(() => pool.end());
