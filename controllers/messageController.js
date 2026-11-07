@@ -49,6 +49,7 @@ exports.getConversations = async (req, res) => {
           latest.message_text,
           CASE
             WHEN latest.message_type = 'image' THEN 'Sent an image'
+            WHEN latest.message_type = 'video' THEN 'Sent a video'
             WHEN latest.message_type = 'file' THEN 'Sent an attachment'
             ELSE NULL
           END
@@ -827,11 +828,10 @@ exports.sendAttachment = async (req, res) => {
 
     let messageType = 'file';
 
-    if (
-      req.file.mimetype.startsWith('image/')
-    ) {
-
+    if (req.file.mimetype.startsWith('image/')) {
       messageType = 'image';
+    } else if (req.file.mimetype.startsWith('video/')) {
+      messageType = 'video';
     }
 
     // ========================================================
@@ -979,16 +979,19 @@ exports.sendAttachment = async (req, res) => {
           [senderId]
         );
         const senderName = senderResult.rows[0]?.full_name || 'SitePulse User';
+        const attachmentDesc = req.file.mimetype.startsWith('video/')
+          ? 'Sent a video'
+          : (req.file.mimetype.startsWith('image/') ? 'Sent an image' : 'Sent an attachment');
 
         for (const row of membersResult.rows) {
           messaging.send({
             notification: {
               title: senderName,
-              body: 'Sent an attachment'
+              body: attachmentDesc
             },
             data: {
               title: senderName,
-              message: 'Sent an attachment',
+              message: attachmentDesc,
               conversationId: String(conversationId),
               type: 'chat_message'
             },

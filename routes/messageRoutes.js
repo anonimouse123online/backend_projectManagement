@@ -95,6 +95,15 @@ const fileFilter = (
     'image/gif',
     'image/svg+xml',
 
+    // Videos
+    'video/mp4',
+    'video/webm',
+    'video/quicktime',
+    'video/x-matroska',
+    'video/avi',
+    'video/x-msvideo',
+    'video/3gpp',
+
     // Documents
     'application/pdf',
     'application/msword',
@@ -119,11 +128,11 @@ const fileFilter = (
 
   if (
     allowedMimeTypes.includes(file.mimetype) ||
-    file.originalname.match(/\.(jpg|jpeg|png|webp|gif|svg|pdf|doc|docx|xls|xlsx|csv|txt|zip|rar|dwg)$/i)
+    file.originalname.match(/\.(jpg|jpeg|png|webp|gif|svg|pdf|doc|docx|xls|xlsx|csv|txt|zip|rar|dwg|mp4|mov|webm|mkv|avi|3gp)$/i)
   ) {
     cb(null, true);
   } else {
-    cb(new Error('Unsupported file type. Please upload a standard image or document.'), false);
+    cb(new Error('Unsupported file type. Please upload a standard image, video, or document.'), false);
   }
 };
 
@@ -136,9 +145,9 @@ const upload = multer({
 
   limits: {
 
-    // 10 MB
+    // 100 MB (supports large videos)
     fileSize:
-      10 * 1024 * 1024
+      100 * 1024 * 1024
   }
 });
 
