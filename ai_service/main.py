@@ -141,7 +141,7 @@ def generate_report(
         f"Work Progress\n\n"
         f"{task_name}: 100% Completed\n\n"
         f"Ongoing Scope of works\n\n"
-        f"General Site Finishing & Testing\n\n"
+        f"General Site Finishing & Testing: 50% Ongoing\n\n"
         f"Based on visual observations from {len(all_observations)} photo(s):\n{obs_text}\n"
         f"Keep the output clean and strictly match the sections above."
     )

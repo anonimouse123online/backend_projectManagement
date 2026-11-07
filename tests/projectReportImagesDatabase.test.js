@@ -25,7 +25,7 @@ test('project daily report images upload, persist, retrieve, and serve only to p
       CREATE TABLE projects (id UUID PRIMARY KEY, code TEXT UNIQUE, name TEXT, location TEXT, status TEXT,
         owner_id UUID, start_date DATE, end_date DATE);
       CREATE TABLE project_members (project_id TEXT, user_id UUID, user_name TEXT);
-      CREATE TABLE tasks (id UUID PRIMARY KEY, project_id UUID, assignee_id UUID);
+      CREATE TABLE tasks (id UUID PRIMARY KEY, project_id UUID, assignee_id UUID, subtasks JSONB DEFAULT '[]'::jsonb, progress_pct INT DEFAULT 0);
       CREATE TABLE project_reports (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), project_code TEXT NOT NULL,
         task_id UUID, title TEXT NOT NULL, report_type TEXT NOT NULL DEFAULT 'Daily Site Log', report_date DATE NOT NULL DEFAULT CURRENT_DATE,
         prepared_by UUID, summary TEXT NOT NULL, key_activities TEXT, issues_highlighted TEXT,
