@@ -67,6 +67,11 @@ router.patch(
   taskController.assignTask
 );
 
+router.patch(
+  '/:id/due-date',
+  taskController.updateTaskDueDate
+);
+
 
 // ============================================================
 // COMPLETE TASK

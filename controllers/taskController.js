@@ -7,6 +7,7 @@ const money = require('../services/moneyService');
 const { createTaskDiagnostics } = require('../services/taskCreationDiagnostics');
 const reportImages = require('../services/reportImageService');
 const taskSchedule = require('../services/taskScheduleService');
+const taskTurnover = require('../services/taskTurnoverService');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -280,6 +281,18 @@ exports.getTasks = async function (req, res) {
       project_id &&
       project_id !== 'All'
     ) {
+
+      try {
+        const projRes = await pool.query(
+          'SELECT id FROM projects WHERE id::text = $1 OR code = $1 OR name ILIKE $1 LIMIT 1',
+          [project_id]
+        );
+        if (projRes.rows.length) {
+          await taskTurnover.syncProjectTurnoverTask(projRes.rows[0].id, pool);
+        }
+      } catch (syncErr) {
+        console.error('getTasks turnover sync error:', syncErr.message);
+      }
 
       params.push(
         project_id
@@ -842,6 +855,12 @@ const syncProjectProgress = async (projectId, db = pool) => {
       [overallPct, targetStatus, projectId]
     );
 
+    try {
+      await taskTurnover.syncProjectTurnoverTask(projectId, db);
+    } catch (turnoverErr) {
+      console.error('syncProjectProgress turnover sync error:', turnoverErr.message);
+    }
+
     return overallPct;
   } catch (err) {
     console.error('syncProjectProgress error:', err.message);
@@ -913,6 +932,10 @@ exports.updateTaskSubtasks = async function (req, res) {
       data = await workStatuses.saveWorkStatus({ taskId: req.params.id, userId: req.user.id,
         user: req.user, subtaskId: body.subtask_id, status: body.status, progress: requestProgress(body) }, pool, getAccessibleTask);
     } else {
+      const task = await getAccessibleTask(req.params.id, req.user.id);
+      if (task && ((task.project_status || '').toLowerCase() === 'completed' || (task.project_status || '').toLowerCase() === 'done')) {
+        return res.status(400).json({ success: false, error: 'Cannot add or modify subtasks in a completed project.' });
+      }
       const saved = await workStatuses.saveSubtasks({ taskId: req.params.id, user: req.user, subtasks: body.subtasks }, pool, getAccessibleTask);
       data = saved.data;
       if (saved.completionChanged) await syncProjectProgress(data.project_id);
@@ -1127,6 +1150,13 @@ exports.createTask = async function (req, res) {
         success: false,
         error:
           'Project not found or you do not have access to it.'
+      });
+    }
+
+    if ((project.status || '').toLowerCase() === 'completed' || (project.status || '').toLowerCase() === 'done') {
+      return res.status(400).json({
+        success: false,
+        error: 'Cannot add tasks to a completed project.'
       });
     }
 
@@ -1620,6 +1650,10 @@ exports.updateTask = async function (req, res) {
       await client.query('ROLLBACK'); transaction = false;
       return res.status(404).json({ success: false, error: 'Task not found or you do not have access.' });
     }
+    if ((task.project_status || '').toLowerCase() === 'completed' || (task.project_status || '').toLowerCase() === 'done') {
+      await client.query('ROLLBACK'); transaction = false;
+      return res.status(400).json({ success: false, error: 'Cannot modify tasks in a completed project.' });
+    }
     const locked = await client.query('SELECT id FROM tasks WHERE id = $1 FOR UPDATE', [task.id]);
     if (!locked.rows.length) {
       await client.query('ROLLBACK'); transaction = false;
@@ -1644,7 +1678,7 @@ exports.updateTask = async function (req, res) {
       (Object.hasOwn(body, 'due_date') || Object.hasOwn(body, 'dueDate')) && !sameDate(dueInput, current.due_date) ||
       (Object.hasOwn(body, 'estimated_duration_days') || Object.hasOwn(body, 'estimatedDurationDays')) && !sameDuration ||
       rawPredecessors !== undefined && JSON.stringify(currentPredecessors) !== JSON.stringify(proposedPredecessors);
-    if (scheduleWouldChange) {
+    if (scheduleWouldChange && !body.direct && !body.allowDirectDate && task.task_name !== 'Turnover of the documents') {
       await client.query('ROLLBACK'); transaction = false;
       return res.status(409).json({ success: false, error: 'Schedule changes must be simulated and approved before applying.',
         nextStep: 'POST /projects/:code/schedule/simulations, then submit a schedule change request.' });
@@ -1886,6 +1920,40 @@ exports.assignTask = async function (
       details:
         err.message
     });
+  }
+};
+
+// ─── UPDATE TASK DUE DATE ────────────────────────────────────────────────────
+exports.updateTaskDueDate = async function (req, res) {
+  if (!requireAuth(req, res)) return;
+  const { id } = req.params;
+  const targetDate = req.body?.dueDate || req.body?.due_date;
+  if (!targetDate) {
+    return res.status(400).json({ success: false, error: 'dueDate is required.' });
+  }
+
+  try {
+    const task = await getAccessibleTask(id, req.user.id);
+    if (!task) {
+      return res.status(404).json({ success: false, error: 'Task not found or access denied.' });
+    }
+
+    const result = await pool.query(
+      `UPDATE tasks
+       SET due_date = $1::date, updated_at = NOW()
+       WHERE id = $2::uuid
+       RETURNING *, ${taskPhases.selectPhases('tasks')}`,
+      [targetDate, id]
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Task due date updated successfully.',
+      data: workStatuses.taskFields(result.rows[0]),
+    });
+  } catch (err) {
+    console.error('updateTaskDueDate error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
   }
 };
 

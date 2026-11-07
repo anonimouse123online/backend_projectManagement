@@ -7,6 +7,7 @@ const money = require('../services/moneyService');
 const { imagesForReport: taskImagesForReport } = require('../services/reportImageService');
 const projectReportImages = require('../services/projectReportImageService');
 const projectFiles = require('../services/projectFileService');
+const { syncProjectTurnoverTask } = require('../services/taskTurnoverService');
 const { countColumns, countJoin } = require('../services/projectIssueService');
 const crypto = require('crypto');
 const path = require('path');
@@ -794,6 +795,12 @@ const createProject = async (req, res) => {
       ]
     );
 
+
+    try {
+      await syncProjectTurnoverTask(rows[0].id, pool);
+    } catch (turnoverErr) {
+      console.error('createProject turnover sync error:', turnoverErr.message);
+    }
 
     return res.status(201).json({
       message: 'Project created successfully',
