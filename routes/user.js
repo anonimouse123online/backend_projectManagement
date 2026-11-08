@@ -68,10 +68,10 @@ router.get(
             u.role,
             COALESCE(
               ARRAY_AGG(DISTINCT rel.name) FILTER (WHERE rel.name IS NOT NULL),
-              '{}'
+              ARRAY[]::text[]
             ) AS shared_projects
           FROM users u
-          JOIN (
+          LEFT JOIN (
             -- 1. Members of projects owned by current user
             SELECT pm.user_id, pm.user_name, p.name
             FROM project_members pm
@@ -119,10 +119,10 @@ router.get(
             u.role,
             COALESCE(
               ARRAY_AGG(DISTINCT rel.name) FILTER (WHERE rel.name IS NOT NULL),
-              '{}'
+              ARRAY[]::text[]
             ) AS shared_projects
           FROM users u
-          JOIN (
+          LEFT JOIN (
             -- 1. Members of projects owned by current user
             SELECT pm.user_id, pm.user_name, p.name
             FROM project_members pm

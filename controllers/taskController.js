@@ -495,6 +495,9 @@ exports.getTasks = async function (req, res) {
         t.due_date::text
           AS due_date,
 
+        t.original_due_date::text AS original_due_date,
+        COALESCE(t.is_extended, FALSE) AS is_extended,
+
         t.start_date::text AS start_date,
         t.estimated_duration_days,
         COALESCE((SELECT jsonb_agg(td.predecessor_task_id::text ORDER BY td.predecessor_task_id)
@@ -1378,6 +1381,8 @@ exports.createTask = async function (req, res) {
           phase,
           assignee_id,
           due_date,
+          original_due_date,
+          is_extended,
           start_date,
           estimated_duration_days,
           priority,
@@ -1395,6 +1400,8 @@ exports.createTask = async function (req, res) {
           $2,
           $3,
           $4,
+          $4,
+          FALSE,
           $5,
           $6,
           $7,
@@ -1697,6 +1704,14 @@ exports.updateTask = async function (req, res) {
       if (Object.hasOwn(body, 'due_date') || Object.hasOwn(body, 'dueDate')) {
         if (!dueInput) throw new taskPhases.PhaseError('Task due date cannot be empty.');
         add('due_date', dueInput);
+        const currentDue = current.due_date ? String(current.due_date).slice(0, 10) : null;
+        const origDue = current.original_due_date ? String(current.original_due_date).slice(0, 10) : currentDue;
+        if (currentDue && dueInput !== currentDue) {
+          add('is_extended', true);
+          if (!current.original_due_date && origDue) {
+            add('original_due_date', origDue);
+          }
+        }
       }
       if (Object.hasOwn(body, 'estimated_duration_days') || Object.hasOwn(body, 'estimatedDurationDays')) add('estimated_duration_days', durationInput || null);
       await taskSchedule.persistDependencies(client, task.id, predecessorIds);
@@ -1938,12 +1953,21 @@ exports.updateTaskDueDate = async function (req, res) {
       return res.status(404).json({ success: false, error: 'Task not found or access denied.' });
     }
 
+    const currentDue = task.due_date ? String(task.due_date).slice(0, 10) : null;
+    const origDue = task.original_due_date ? String(task.original_due_date).slice(0, 10) : currentDue;
+    const baselineDue = origDue || targetDate;
+    // Extended ONLY if new due date is strictly after (>) the baseline given due date
+    const isExtended = Boolean(origDue && targetDate > origDue);
+
     const result = await pool.query(
       `UPDATE tasks
-       SET due_date = $1::date, updated_at = NOW()
-       WHERE id = $2::uuid
+       SET due_date = $1::date,
+           original_due_date = COALESCE(original_due_date, $2::date),
+           is_extended = $3,
+           updated_at = NOW()
+       WHERE id = $4::uuid
        RETURNING *, ${taskPhases.selectPhases('tasks')}`,
-      [targetDate, id]
+      [targetDate, baselineDue, isExtended, id]
     );
 
     return res.status(200).json({

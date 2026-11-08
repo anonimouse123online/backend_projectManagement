@@ -1636,8 +1636,7 @@ const addMember = async (req, res) => {
     }
 
 
-    // The invited member chooses their project position after opening the invitation.
-    const memberRole = '';
+    const memberRole = (req.body.role || req.body.position || '').trim() || 'Member';
 
     await pool.query(
       `

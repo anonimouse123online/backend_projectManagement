@@ -137,55 +137,16 @@ exports.getConversations = async (req, res) => {
 };
 
 
-// Helper: Verify if target users share at least one project with userId
+// Helper: Verify if target users exist and are active colleagues in the system
 async function areUsersInSameProjects(clientOrPool, userId, targetUserIds) {
   if (!targetUserIds || targetUserIds.length === 0) return true;
 
-  // Check if sender or any target user is admin
-  const adminCheck = await clientOrPool.query(
-    `SELECT id FROM users WHERE (id = $1::uuid OR id = ANY($2::uuid[])) AND LOWER(role) LIKE '%admin%'`,
-    [userId, targetUserIds]
-  );
-
-  const isSenderAdmin = adminCheck.rows.some(r => r.id === userId);
-  if (isSenderAdmin) return true;
-
-  const adminIds = new Set(adminCheck.rows.map(r => r.id));
-  const nonAdminTargets = targetUserIds.filter(id => !adminIds.has(id));
-  if (nonAdminTargets.length === 0) return true;
-
+  // Verify all target users exist and are active registered users
   const res = await clientOrPool.query(
-    `
-    SELECT DISTINCT rel.user_id
-    FROM (
-      SELECT pm.user_id
-      FROM project_members pm
-      JOIN projects p ON (pm.project_id = p.code OR pm.project_id = p.id::text)
-      WHERE p.owner_id = $1::uuid
-      
-      UNION
-      
-      SELECT p.owner_id AS user_id
-      FROM projects p
-      JOIN project_members pm ON (pm.project_id = p.code OR pm.project_id = p.id::text)
-      WHERE pm.user_id = $1::uuid
-      
-      UNION
-      
-      SELECT pm1.user_id
-      FROM project_members pm1
-      JOIN projects p ON (pm1.project_id = p.code OR pm1.project_id = p.id::text)
-      WHERE pm1.project_id IN (
-        SELECT pm2.project_id
-        FROM project_members pm2
-        WHERE pm2.user_id = $1::uuid
-      )
-    ) rel
-    WHERE rel.user_id = ANY($2::uuid[])
-    `,
-    [userId, nonAdminTargets]
+    `SELECT id FROM users WHERE id = ANY($1::uuid[]) AND is_active = TRUE`,
+    [targetUserIds]
   );
-  return res.rows.length === nonAdminTargets.length;
+  return res.rows.length === targetUserIds.length;
 }
 
 // ============================================================

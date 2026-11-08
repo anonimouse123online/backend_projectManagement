@@ -70,6 +70,8 @@ function taskFields(task) {
     ...task,
     ...(Object.hasOwn(task, 'start_date') ? { start_date: dateOnly(task.start_date) } : {}),
     ...(Object.hasOwn(task, 'due_date') ? { due_date: dateOnly(task.due_date) } : {}),
+    ...(Object.hasOwn(task, 'original_due_date') ? { original_due_date: dateOnly(task.original_due_date) } : {}),
+    is_extended: Boolean(task.is_extended),
     status: displayStatus(task.status),
     progress: task.progress_pct ?? task.progress ?? 0,
     subtasks: (Array.isArray(task.subtasks) ? task.subtasks : []).map(subtaskFields),
