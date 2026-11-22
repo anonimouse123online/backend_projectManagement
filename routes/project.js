@@ -29,6 +29,9 @@ const {
   getProjectReports,
   createProjectReport,
   updateProjectReport,
+  getProjectGeofence,
+  updateProjectGeofence,
+  verifyProjectGeofence,
 } = require('../controllers/projectController');
 
 // Both project-code and UUID issue URLs share the same authorization checks.
@@ -116,6 +119,9 @@ router.get('/unresolved-issues-count', async (req, res) => {
 });
 router.get('/:code',                         getProjectByCode);
 router.get('/:code/active-code',             getActiveCode);
+router.get('/:code/geofence',                getProjectGeofence);
+router.patch('/:code/geofence',              access.project(true), updateProjectGeofence);
+router.post('/:code/geofence/verify',        verifyProjectGeofence);
 router.patch('/:code/status',                updateProjectStatus);
 router.patch('/:code/due-date',              access.project(true), updateProjectDueDate);
 router.delete('/:code',                      deleteProject);

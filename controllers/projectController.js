@@ -570,7 +570,11 @@ const createProject = async (req, res) => {
       status,
       project_type,
       construction_method,
-      schedule_risk_acknowledged
+      schedule_risk_acknowledged,
+      geofence_latitude,
+      geofence_longitude,
+      geofence_radius,
+      geofence_enabled
     } = req.body;
 
 
@@ -705,6 +709,10 @@ const createProject = async (req, res) => {
       ? project_type.trim() : null;
     const cleanConstructionMethod = construction_method && typeof construction_method === 'string'
       ? construction_method.trim() : null;
+    const cleanGeofenceLat = geofence_latitude != null && geofence_latitude !== '' ? parseFloat(geofence_latitude) : null;
+    const cleanGeofenceLng = geofence_longitude != null && geofence_longitude !== '' ? parseFloat(geofence_longitude) : null;
+    const cleanGeofenceRadius = geofence_radius != null && geofence_radius !== '' ? parseFloat(geofence_radius) : 200.0;
+    const cleanGeofenceEnabled = geofence_enabled === true || geofence_enabled === 'true';
 
     const { rows } = await pool.query(
       `
@@ -724,7 +732,11 @@ const createProject = async (req, res) => {
         owner_id,
         project_type,
         construction_method,
-        schedule_risk_level
+        schedule_risk_level,
+        geofence_latitude,
+        geofence_longitude,
+        geofence_radius,
+        geofence_enabled
       )
 
       VALUES
@@ -743,7 +755,11 @@ const createProject = async (req, res) => {
         $12,
         $13,
         $14,
-        $15
+        $15,
+        $16,
+        $17,
+        $18,
+        $19
       )
 
       RETURNING
@@ -760,6 +776,10 @@ const createProject = async (req, res) => {
         project_type,
         construction_method,
         schedule_risk_level,
+        geofence_latitude,
+        geofence_longitude,
+        geofence_radius,
+        geofence_enabled,
 
         TO_CHAR(
           start_date,
@@ -791,7 +811,11 @@ const createProject = async (req, res) => {
         req.user.id,
         cleanProjectType,
         cleanConstructionMethod,
-        scheduleRiskLevel
+        scheduleRiskLevel,
+        cleanGeofenceLat,
+        cleanGeofenceLng,
+        cleanGeofenceRadius,
+        cleanGeofenceEnabled
       ]
     );
 
@@ -4749,6 +4773,161 @@ const updateProjectReport = async (req, res) => {
 
 
 // ============================================================
+// GEOFENCING MODULE
+// ============================================================
+
+// Calculate Haversine distance in meters between two lat/lng coordinates
+const calculateHaversineDistance = (lat1, lon1, lat2, lon2) => {
+  const R = 6371e3; // Earth radius in meters
+  const toRad = (x) => (x * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(R * c * 10) / 10;
+};
+
+const getProjectGeofence = async (req, res) => {
+  if (authRequired(req, res)) return;
+  const { code } = req.params;
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, code, name, location, geofence_latitude, geofence_longitude, geofence_radius, geofence_enabled
+       FROM projects WHERE code = $1 OR id::text = $1 LIMIT 1`,
+      [code]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: 'Project not found' });
+    }
+    return res.status(200).json({ success: true, data: rows[0] });
+  } catch (error) {
+    console.error('getProjectGeofence error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to fetch project geofence', error: error.message });
+  }
+};
+
+const updateProjectGeofence = async (req, res) => {
+  if (authRequired(req, res)) return;
+  const { code } = req.params;
+  const { latitude, longitude, radius, enabled } = req.body || {};
+
+  const lat = latitude != null && latitude !== '' ? parseFloat(latitude) : null;
+  const lng = longitude != null && longitude !== '' ? parseFloat(longitude) : null;
+  const rad = radius != null && radius !== '' ? parseFloat(radius) : 200.0;
+  const isEnabled = enabled === true || enabled === 'true';
+
+  if (lat !== null && (isNaN(lat) || lat < -90 || lat > 90)) {
+    return res.status(400).json({ success: false, message: 'Latitude must be between -90 and 90.' });
+  }
+  if (lng !== null && (isNaN(lng) || lng < -180 || lng > 180)) {
+    return res.status(400).json({ success: false, message: 'Longitude must be between -180 and 180.' });
+  }
+  if (isNaN(rad) || rad <= 0) {
+    return res.status(400).json({ success: false, message: 'Radius must be a positive number of meters.' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `UPDATE projects
+       SET geofence_latitude = $1,
+           geofence_longitude = $2,
+           geofence_radius = $3,
+           geofence_enabled = $4,
+           updated_at = NOW()
+       WHERE code = $5 OR id::text = $5
+       RETURNING id, code, name, location, geofence_latitude, geofence_longitude, geofence_radius, geofence_enabled`,
+      [lat, lng, rad, isEnabled, code]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: 'Project not found.' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Project geofence updated successfully.',
+      data: rows[0]
+    });
+  } catch (error) {
+    console.error('updateProjectGeofence error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to update geofence', error: error.message });
+  }
+};
+
+const verifyProjectGeofence = async (req, res) => {
+  if (authRequired(req, res)) return;
+  const { code } = req.params;
+  const { latitude, longitude } = req.body || {};
+
+  const userLat = parseFloat(latitude);
+  const userLng = parseFloat(longitude);
+
+  if (isNaN(userLat) || isNaN(userLng)) {
+    return res.status(400).json({ success: false, message: 'Valid latitude and longitude are required for verification.' });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, code, name, geofence_latitude, geofence_longitude, geofence_radius, geofence_enabled
+       FROM projects WHERE code = $1 OR id::text = $1 LIMIT 1`,
+      [code]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: 'Project not found.' });
+    }
+
+    const project = rows[0];
+    const fenceLat = project.geofence_latitude ? parseFloat(project.geofence_latitude) : null;
+    const fenceLng = project.geofence_longitude ? parseFloat(project.geofence_longitude) : null;
+    const radiusMeters = project.geofence_radius ? parseFloat(project.geofence_radius) : 200.0;
+    const isEnabled = Boolean(project.geofence_enabled);
+
+    if (!isEnabled || fenceLat == null || fenceLng == null) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          geofence_enabled: isEnabled,
+          has_coordinates: fenceLat != null && fenceLng != null,
+          is_inside: true,
+          distance_meters: null,
+          allowed_radius_meters: radiusMeters,
+          status: 'UNRESTRICTED',
+          message: isEnabled ? 'Geofence coordinates not yet configured for this project.' : 'Geofence verification is disabled for this project.'
+        }
+      });
+    }
+
+    const distance = calculateHaversineDistance(userLat, userLng, fenceLat, fenceLng);
+    const isInside = distance <= radiusMeters;
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        geofence_enabled: true,
+        has_coordinates: true,
+        is_inside: isInside,
+        distance_meters: distance,
+        allowed_radius_meters: radiusMeters,
+        status: isInside ? 'INSIDE' : 'OUTSIDE',
+        center: { latitude: fenceLat, longitude: fenceLng },
+        user: { latitude: userLat, longitude: userLng },
+        message: isInside
+          ? `Verified inside project site boundary (${distance}m from site center, radius: ${radiusMeters}m).`
+          : `Outside site boundary (${distance}m from site center, exceeds allowed ${radiusMeters}m radius).`
+      }
+    });
+  } catch (error) {
+    console.error('verifyProjectGeofence error:', error);
+    return res.status(500).json({ success: false, message: 'Geofence verification failed', error: error.message });
+  }
+};
+
+
+// ============================================================
 // EXPORTS
 // ============================================================
 
@@ -4763,6 +4942,12 @@ module.exports = {
   updateProjectStatus,
 
   updateProjectDueDate,
+
+  getProjectGeofence,
+
+  updateProjectGeofence,
+
+  verifyProjectGeofence,
 
   generateProjectCode,
 

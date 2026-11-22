@@ -132,6 +132,9 @@ exports.getTimelogs = async (req, res) => {
           'YYYY-MM-DD'
         ) AS date,
 
+        tl.time_in,
+        tl.time_out,
+
         COALESCE(
           tl.work_on_site,
           0
@@ -370,6 +373,8 @@ exports.createTimelog = async (req, res) => {
       project_name,
       engineer_name,
       date,
+      time_in,
+      time_out,
       work_on_site,
       supervisors,
       sub_contractors,
@@ -415,6 +420,8 @@ exports.createTimelog = async (req, res) => {
         project_name,
         engineer_name,
         date,
+        time_in,
+        time_out,
         work_on_site,
         supervisors,
         sub_contractors,
@@ -443,6 +450,8 @@ exports.createTimelog = async (req, res) => {
         $11,
         $12,
         $13,
+        $14,
+        $15,
         NOW(),
         NOW()
       )
@@ -457,6 +466,8 @@ exports.createTimelog = async (req, res) => {
           'YYYY-MM-DD'
         ) AS date,
 
+        time_in,
+        time_out,
         work_on_site,
         supervisors,
         sub_contractors,
@@ -482,6 +493,10 @@ exports.createTimelog = async (req, res) => {
         'Site Engineer',
 
       date,
+
+      time_in?.trim() || null,
+
+      time_out?.trim() || null,
 
       work_on_site ?? 0,
 

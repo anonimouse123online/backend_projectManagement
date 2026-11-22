@@ -278,6 +278,8 @@ CREATE TABLE IF NOT EXISTS time_logs (
   project_name        VARCHAR(255) NOT NULL,
   engineer_name       VARCHAR(255),
   date                DATE NOT NULL DEFAULT CURRENT_DATE,
+  time_in             VARCHAR(50),
+  time_out            VARCHAR(50),
   work_on_site        INTEGER DEFAULT 0,
   supervisors         INTEGER DEFAULT 0,
   sub_contractors     INTEGER DEFAULT 0,

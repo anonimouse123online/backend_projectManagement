@@ -187,7 +187,11 @@ const getAll = async (
 
       p.project_type,
       p.construction_method,
-      p.schedule_risk_level
+      p.schedule_risk_level,
+      p.geofence_latitude,
+      p.geofence_longitude,
+      p.geofence_radius,
+      p.geofence_enabled
 
 
     FROM projects p
@@ -359,7 +363,11 @@ const getByCode = async (
 
           p.project_type,
           p.construction_method,
-          p.schedule_risk_level
+          p.schedule_risk_level,
+          p.geofence_latitude,
+          p.geofence_longitude,
+          p.geofence_radius,
+          p.geofence_enabled
 
 
         FROM projects p
