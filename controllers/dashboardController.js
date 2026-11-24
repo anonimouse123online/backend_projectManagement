@@ -80,9 +80,10 @@ exports.getStats = async (req, res) => {
 
 
     // ============================================================
-    // TASK COUNT
+    // TASK COUNT (EXCLUDING COMPLETED TASKS)
     //
     // tasks.project_id -> projects.id
+    // Only counts tasks that are not marked Completed
     // ============================================================
 
     const taskQuery = `
@@ -95,6 +96,7 @@ exports.getStats = async (req, res) => {
         ON p.id = t.project_id
 
       WHERE ${PROJECT_ACCESS_SQL}
+        AND (t.status IS NULL OR LOWER(t.status) != 'completed')
     `;
 
 
@@ -119,63 +121,9 @@ exports.getStats = async (req, res) => {
     `;
 
 
-    // ============================================================
-    // TEAM MEMBER COUNT
-    //
-    // Counts:
-    // - project owners
-    // - project members
-    //
-    // But only for projects accessible by current user.
-    // ============================================================
-
-    const teamQuery = `
-      WITH accessible_projects AS (
-
-        SELECT
-          p.code,
-          p.owner_id
-
-        FROM projects p
-
-        WHERE ${PROJECT_ACCESS_SQL}
-      ),
-
-      project_users AS (
-
-        SELECT
-          owner_id AS user_id
-
-        FROM accessible_projects
-
-        WHERE owner_id IS NOT NULL
-
-
-        UNION
-
-
-        SELECT
-          pm.user_id
-
-        FROM project_members pm
-
-        INNER JOIN accessible_projects ap
-          ON ap.code = pm.project_id
-
-        WHERE pm.user_id IS NOT NULL
-      )
-
-      SELECT
-        COUNT(DISTINCT user_id) AS total
-
-      FROM project_users
-    `;
-
-
     const [
       projRes,
       taskRes,
-      teamRes,
       issueRes
     ] = await Promise.all([
 
@@ -186,11 +134,6 @@ exports.getStats = async (req, res) => {
 
       pool.query(
         taskQuery,
-        [userId]
-      ),
-
-      pool.query(
-        teamQuery,
         [userId]
       ),
 
@@ -212,13 +155,6 @@ exports.getStats = async (req, res) => {
     const totalTasks =
       parseInt(
         taskRes.rows[0]?.total ??
-        0
-      ) || 0;
-
-
-    const teamMembers =
-      parseInt(
-        teamRes.rows[0]?.total ??
         0
       ) || 0;
 
@@ -258,20 +194,6 @@ exports.getStats = async (req, res) => {
         bg: '#F0FDF4',
         clr: '#22C55E',
         icon: '✅'
-      },
-
-      {
-        label: 'Team Members',
-        value: String(teamMembers),
-        trend:
-          teamMembers > 0
-            ? '+100%'
-            : '0%',
-        up:
-          teamMembers > 0,
-        bg: '#FFFBEB',
-        clr: '#F59E0B',
-        icon: '👥'
       },
 
       {
