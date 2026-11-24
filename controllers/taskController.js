@@ -518,7 +518,9 @@ exports.getTasks = async function (req, res) {
           '[]'::jsonb
         ) AS subtasks,
 
-        COALESCE(t.progress_pct, 0) AS progress_pct
+        COALESCE(t.progress_pct, 0) AS progress_pct,
+
+        t.created_at::text AS created_at
 
 
       FROM tasks t
@@ -538,9 +540,7 @@ exports.getTasks = async function (req, res) {
 
       ORDER BY
 
-        t.phase NULLS LAST,
-
-        t.created_at DESC
+        t.created_at ASC
     `;
 
 
