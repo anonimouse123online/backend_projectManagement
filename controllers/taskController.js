@@ -2115,14 +2115,20 @@ exports.updateTaskDueDate = async function (req, res) {
       return res.status(404).json({ success: false, error: 'Task not found or access denied.' });
     }
 
-    const currentDue = task.due_date ? String(task.due_date).slice(0, 10) : null;
-    const currentStart = task.start_date ? String(task.start_date).slice(0, 10) : null;
+    // Query current task schedule fields from database
+    const taskDetailsRes = await client.query(
+      'SELECT id, task_name, start_date::text, due_date::text, original_due_date::text FROM tasks WHERE id = $1',
+      [id]
+    );
+    const taskDetails = taskDetailsRes.rows[0] || {};
+    const currentDue = taskDetails.due_date ? String(taskDetails.due_date).slice(0, 10) : null;
+    const currentStart = taskDetails.start_date ? String(taskDetails.start_date).slice(0, 10) : null;
     if (currentStart && targetDate < currentStart) {
       client.release();
       return res.status(400).json({ success: false, error: `Due date cannot be earlier than start date (${currentStart}).` });
     }
 
-    const origDue = task.original_due_date ? String(task.original_due_date).slice(0, 10) : currentDue;
+    const origDue = taskDetails.original_due_date ? String(taskDetails.original_due_date).slice(0, 10) : currentDue;
     const baselineDue = origDue || targetDate;
     // Extended ONLY if new due date is strictly after (>) the baseline given due date
     const isExtended = Boolean(origDue && targetDate > origDue);
