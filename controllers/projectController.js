@@ -4793,11 +4793,13 @@ const calculateHaversineDistance = (lat1, lon1, lat2, lon2) => {
 const getProjectGeofence = async (req, res) => {
   if (authRequired(req, res)) return;
   const { code } = req.params;
+  const targetId = req.project?.id || code;
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(targetId));
   try {
     const { rows } = await pool.query(
       `SELECT id, code, name, location, geofence_latitude, geofence_longitude, geofence_radius, geofence_enabled
-       FROM projects WHERE code = $1 OR id::text = $1 LIMIT 1`,
-      [code]
+       FROM projects WHERE ${isUuid ? 'id = $1::uuid' : 'id::text = $1 OR lower(code) = lower($1)'} LIMIT 1`,
+      [targetId]
     );
     if (!rows.length) {
       return res.status(404).json({ success: false, message: 'Project not found' });
@@ -4812,6 +4814,7 @@ const getProjectGeofence = async (req, res) => {
 const updateProjectGeofence = async (req, res) => {
   if (authRequired(req, res)) return;
   const { code } = req.params;
+  const targetId = req.project?.id || code;
   const { latitude, longitude, radius, enabled } = req.body || {};
 
   const lat = latitude != null && latitude !== '' ? parseFloat(latitude) : null;
@@ -4830,6 +4833,7 @@ const updateProjectGeofence = async (req, res) => {
   }
 
   try {
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(targetId));
     const { rows } = await pool.query(
       `UPDATE projects
        SET geofence_latitude = $1,
@@ -4837,9 +4841,13 @@ const updateProjectGeofence = async (req, res) => {
            geofence_radius = $3,
            geofence_enabled = $4,
            updated_at = NOW()
-       WHERE code = $5 OR id::text = $5
+       WHERE id = (
+         SELECT id FROM projects
+         WHERE ${isUuid ? 'id = $5::uuid' : 'id::text = $5 OR lower(code) = lower($5)'}
+         LIMIT 1
+       )
        RETURNING id, code, name, location, geofence_latitude, geofence_longitude, geofence_radius, geofence_enabled`,
-      [lat, lng, rad, isEnabled, code]
+      [lat, lng, rad, isEnabled, targetId]
     );
 
     if (!rows.length) {
@@ -4860,6 +4868,7 @@ const updateProjectGeofence = async (req, res) => {
 const verifyProjectGeofence = async (req, res) => {
   if (authRequired(req, res)) return;
   const { code } = req.params;
+  const targetId = req.project?.id || code;
   const { latitude, longitude } = req.body || {};
 
   const userLat = parseFloat(latitude);
@@ -4870,10 +4879,11 @@ const verifyProjectGeofence = async (req, res) => {
   }
 
   try {
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(targetId));
     const { rows } = await pool.query(
       `SELECT id, code, name, geofence_latitude, geofence_longitude, geofence_radius, geofence_enabled
-       FROM projects WHERE code = $1 OR id::text = $1 LIMIT 1`,
-      [code]
+       FROM projects WHERE ${isUuid ? 'id = $1::uuid' : 'id::text = $1 OR lower(code) = lower($1)'} LIMIT 1`,
+      [targetId]
     );
 
     if (!rows.length) {
