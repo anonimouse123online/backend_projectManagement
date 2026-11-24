@@ -41,7 +41,23 @@ exports.getResources = async (req, res) => {
            WHEN category = 'Equipment' THEN 'Available'
            ELSE 'In stock'
          END AS status,
-         task_id AS "taskId", task_name AS "taskName",
+         task_id AS "taskId",
+         COALESCE(
+           task_name,
+           (
+             SELECT t.task_name
+             FROM tasks t
+             WHERE t.id = resources.task_id
+             LIMIT 1
+           ),
+           (
+             SELECT t.task_name
+             FROM tasks t
+             WHERE t.project_id = (SELECT p.id FROM projects p WHERE ${access.resourceProject('resources')} LIMIT 1)
+               AND t.materials_required ILIKE '%' || resources.name || '%'
+             LIMIT 1
+           )
+         ) AS "taskName",
          TO_CHAR(updated_at, 'Mon DD, YYYY') AS "updatedAt"
        FROM resources
        ${where}

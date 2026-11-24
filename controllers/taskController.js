@@ -1495,9 +1495,9 @@ exports.createTask = async function (req, res) {
 
             await db.query(
               `INSERT INTO resources
-               (name, supplier, category, quantity, unit, min_threshold, unit_price, project${generatedResourceStatus ? '' : ', status'}, created_at, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8${generatedResourceStatus ? '' : ', $9'}, NOW(), NOW())`,
-              [itemName, supplier, category, quantity, unit, minThreshold, unitPrice, projectName, ...(generatedResourceStatus ? [] : [status])]
+               (name, supplier, category, quantity, unit, min_threshold, unit_price, project${generatedResourceStatus ? '' : ', status'}, task_id, task_name, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8${generatedResourceStatus ? '' : ', $9'}, $${generatedResourceStatus ? 9 : 10}, $${generatedResourceStatus ? 10 : 11}, NOW(), NOW())`,
+              [itemName, supplier, category, quantity, unit, minThreshold, unitPrice, projectName, ...(generatedResourceStatus ? [] : [status]), result.rows[0].id, result.rows[0].task_name]
             );
           }
         }
@@ -1540,9 +1540,9 @@ exports.createTask = async function (req, res) {
             const status = qty <= 10 ? 'Low stock' : 'In stock';
             await db.query(
               `INSERT INTO resources
-               (name, supplier, category, quantity, unit, min_threshold, unit_price, project${generatedResourceStatus ? '' : ', status'}, created_at, updated_at)
-               VALUES ($1, 'General Supplier', 'Material', $2, $3, 10, 0, $4${generatedResourceStatus ? '' : ', $5'}, NOW(), NOW())`,
-              [name, qty, unit, projectName, ...(generatedResourceStatus ? [] : [status])]
+               (name, supplier, category, quantity, unit, min_threshold, unit_price, project${generatedResourceStatus ? '' : ', status'}, task_id, task_name, created_at, updated_at)
+               VALUES ($1, 'General Supplier', 'Material', $2, $3, 10, 0, $4${generatedResourceStatus ? '' : ', $5'}, $${generatedResourceStatus ? 5 : 6}, $${generatedResourceStatus ? 6 : 7}, NOW(), NOW())`,
+              [name, qty, unit, projectName, ...(generatedResourceStatus ? [] : [status]), result.rows[0].id, result.rows[0].task_name]
             );
           }
         }
