@@ -1936,43 +1936,254 @@ exports.assignTask = async function (
 };
 
 // ─── UPDATE TASK DUE DATE ────────────────────────────────────────────────────
+function parseYMD(val) {
+  if (!val) return null;
+  if (val instanceof Date) val = val.toISOString().slice(0, 10);
+  const match = String(val).slice(0, 10).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  return new Date(Date.UTC(+match[1], +match[2] - 1, +match[3], 12, 0, 0));
+}
+
+function formatYMD(d) {
+  if (!d || isNaN(d.getTime())) return null;
+  const year = d.getUTCFullYear();
+  const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function addDays(d, days) {
+  const next = new Date(d.getTime());
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+function diffDays(a, b) {
+  const ms = 86400000;
+  return Math.round((b.getTime() - a.getTime()) / ms);
+}
+
+async function cascadeTaskSchedule(client, rootTaskId, projectId, reason, actorId) {
+  if (!projectId || !rootTaskId) return [];
+
+  const tasksRes = await client.query(
+    `SELECT id::text, task_name, start_date::text, due_date::text, original_due_date::text,
+            estimated_duration_days, status, is_extended
+     FROM tasks
+     WHERE project_id = $1`,
+    [projectId]
+  );
+  const depsRes = await client.query(
+    `SELECT task_id::text, predecessor_task_id::text, dependency_type, lag_working_days
+     FROM task_dependencies
+     WHERE project_id = $1 OR task_id IN (SELECT id FROM tasks WHERE project_id = $1)`,
+    [projectId]
+  );
+
+  const allTasks = tasksRes.rows;
+  const allDeps = depsRes.rows;
+  const taskMap = new Map(allTasks.map(t => [String(t.id), { ...t }]));
+
+  const queue = [String(rootTaskId)];
+  const updatedMap = new Map();
+  const visitedCount = new Map();
+
+  while (queue.length > 0) {
+    const currId = queue.shift();
+    const count = (visitedCount.get(currId) || 0) + 1;
+    if (count > 50) continue;
+    visitedCount.set(currId, count);
+
+    const successors = allDeps.filter(d => String(d.predecessor_task_id) === currId);
+
+    for (const dep of successors) {
+      const succId = String(dep.task_id);
+      const succ = taskMap.get(succId);
+      if (!succ || succ.status?.toLowerCase() === 'completed') continue;
+
+      const succPreds = allDeps.filter(d => String(d.task_id) === succId);
+      let earliestStart = null;
+
+      for (const p of succPreds) {
+        const predTask = taskMap.get(String(p.predecessor_task_id));
+        if (!predTask || !predTask.due_date) continue;
+        const predDue = parseYMD(predTask.due_date);
+        const lag = Number(p.lag_working_days || 0);
+        const depType = (p.dependency_type || 'FS').toUpperCase();
+
+        let requiredStart;
+        if (depType === 'SS') {
+          const predStart = parseYMD(predTask.start_date || predTask.due_date);
+          requiredStart = addDays(predStart, lag);
+        } else {
+          requiredStart = addDays(predDue, 1 + lag);
+        }
+
+        if (!earliestStart || requiredStart > earliestStart) {
+          earliestStart = requiredStart;
+        }
+      }
+
+      if (!earliestStart) continue;
+
+      let duration = 1;
+      if (succ.estimated_duration_days && Number(succ.estimated_duration_days) > 0) {
+        duration = Number(succ.estimated_duration_days);
+      } else if (succ.start_date && succ.due_date) {
+        duration = Math.max(1, diffDays(parseYMD(succ.start_date), parseYMD(succ.due_date)) + 1);
+      }
+
+      const newStartStr = formatYMD(earliestStart);
+      const newDueStr = formatYMD(addDays(earliestStart, duration - 1));
+
+      const oldStartStr = succ.start_date ? String(succ.start_date).slice(0, 10) : null;
+      const oldDueStr = succ.due_date ? String(succ.due_date).slice(0, 10) : null;
+
+      if (newStartStr !== oldStartStr || newDueStr !== oldDueStr) {
+        succ.start_date = newStartStr;
+        succ.due_date = newDueStr;
+        const succOrigDue = succ.original_due_date ? String(succ.original_due_date).slice(0, 10) : oldDueStr;
+        const succIsExtended = Boolean(succOrigDue && newDueStr > succOrigDue);
+
+        const cascadeReason = reason
+          ? `Cascaded: ${reason}`
+          : 'Cascaded from predecessor update';
+
+        await client.query(
+          `UPDATE tasks
+           SET start_date = $1::date,
+               due_date = $2::date,
+               original_due_date = COALESCE(original_due_date, $3::date),
+               is_extended = $4,
+               modification_reason = $5,
+               updated_at = NOW()
+           WHERE id = $6::uuid`,
+          [newStartStr, newDueStr, succOrigDue || newDueStr, succIsExtended, cascadeReason, succId]
+        );
+
+        if (actorId) {
+          await client.query(
+            `INSERT INTO schedule_audit_logs (
+              project_id, task_id, actor_id, change_type,
+              previous_start_date, previous_end_date,
+              new_start_date, new_end_date,
+              reason
+            ) VALUES ($1, $2, $3, 'CASCADE_SCHEDULE_UPDATE', $4::date, $5::date, $6::date, $7::date, $8)`,
+            [
+              projectId, succId, actorId,
+              oldStartStr, oldDueStr,
+              newStartStr, newDueStr,
+              cascadeReason
+            ]
+          ).catch(err => console.warn('schedule_audit_log warning:', err.message));
+        }
+
+        updatedMap.set(succId, {
+          id: succId,
+          task_name: succ.task_name,
+          start_date: newStartStr,
+          due_date: newDueStr,
+          original_due_date: succOrigDue || newDueStr,
+          is_extended: succIsExtended,
+          modification_reason: cascadeReason,
+        });
+
+        queue.push(succId);
+      }
+    }
+  }
+
+  return Array.from(updatedMap.values());
+}
+
 exports.updateTaskDueDate = async function (req, res) {
   if (!requireAuth(req, res)) return;
   const { id } = req.params;
   const targetDate = req.body?.dueDate || req.body?.due_date;
+  const reason = (req.body?.reason || req.body?.modificationReason || req.body?.modification_reason || '').trim();
   if (!targetDate) {
     return res.status(400).json({ success: false, error: 'dueDate is required.' });
   }
 
+  let client;
   try {
-    const task = await getAccessibleTask(id, req.user.id);
+    client = await pool.connect();
+    const task = await getAccessibleTask(id, req.user.id, client);
     if (!task) {
+      client.release();
       return res.status(404).json({ success: false, error: 'Task not found or access denied.' });
     }
 
     const currentDue = task.due_date ? String(task.due_date).slice(0, 10) : null;
+    const currentStart = task.start_date ? String(task.start_date).slice(0, 10) : null;
+    if (currentStart && targetDate < currentStart) {
+      client.release();
+      return res.status(400).json({ success: false, error: `Due date cannot be earlier than start date (${currentStart}).` });
+    }
+
     const origDue = task.original_due_date ? String(task.original_due_date).slice(0, 10) : currentDue;
     const baselineDue = origDue || targetDate;
     // Extended ONLY if new due date is strictly after (>) the baseline given due date
     const isExtended = Boolean(origDue && targetDate > origDue);
 
-    const result = await pool.query(
+    await client.query('BEGIN');
+
+    const result = await client.query(
       `UPDATE tasks
        SET due_date = $1::date,
            original_due_date = COALESCE(original_due_date, $2::date),
            is_extended = $3,
+           modification_reason = COALESCE($4, modification_reason),
            updated_at = NOW()
-       WHERE id = $4::uuid
+       WHERE id = $5::uuid
        RETURNING *, ${taskPhases.selectPhases('tasks')}`,
-      [targetDate, baselineDue, isExtended, id]
+      [targetDate, baselineDue, isExtended, reason || null, id]
     );
+
+    // Cascade to downstream dependent tasks in the same project
+    const cascaded = await cascadeTaskSchedule(client, id, task.project_id, reason, req.user.id);
+
+    // Insert audit log for the modified task
+    if (task.project_id) {
+      await client.query(
+        `INSERT INTO schedule_audit_logs (
+          project_id, task_id, actor_id, change_type,
+          previous_start_date, previous_end_date,
+          new_start_date, new_end_date,
+          reason
+        ) VALUES ($1, $2, $3, 'DUE_DATE_UPDATE', $4::date, $5::date, $6::date, $7::date, $8)`,
+        [
+          task.project_id, id, req.user.id,
+          currentStart, currentDue,
+          currentStart, targetDate,
+          reason || 'Task due date updated'
+        ]
+      ).catch(err => console.warn('schedule_audit_log warning:', err.message));
+    }
+
+    await client.query('COMMIT');
+
+    const affectedIds = [id, ...cascaded.map(a => a.id)];
+    const allUpdatedResult = await client.query(
+      `SELECT *, ${taskPhases.selectPhases('tasks')} FROM tasks WHERE id = ANY($1::uuid[])`,
+      [affectedIds]
+    );
+
+    client.release();
 
     return res.status(200).json({
       success: true,
-      message: 'Task due date updated successfully.',
+      message: cascaded.length > 0
+        ? `Task due date updated. Shifted ${cascaded.length} dependent task(s).`
+        : 'Task due date updated successfully.',
       data: workStatuses.taskFields(result.rows[0]),
+      affectedTasks: allUpdatedResult.rows.map(workStatuses.taskFields),
     });
   } catch (err) {
+    if (client) {
+      await client.query('ROLLBACK').catch(() => {});
+      client.release();
+    }
     console.error('updateTaskDueDate error:', err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
