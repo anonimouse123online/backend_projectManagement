@@ -497,6 +497,7 @@ exports.getTasks = async function (req, res) {
 
         t.original_due_date::text AS original_due_date,
         COALESCE(t.is_extended, FALSE) AS is_extended,
+        t.modification_reason,
 
         t.start_date::text AS start_date,
         t.estimated_duration_days,
@@ -2042,23 +2043,23 @@ async function cascadeTaskSchedule(client, rootTaskId, projectId, reason, actorI
       if (newStartStr !== oldStartStr || newDueStr !== oldDueStr) {
         succ.start_date = newStartStr;
         succ.due_date = newDueStr;
-        const succOrigDue = succ.original_due_date ? String(succ.original_due_date).slice(0, 10) : oldDueStr;
-        const succIsExtended = Boolean(succOrigDue && newDueStr > succOrigDue);
 
         const cascadeReason = reason
           ? `Cascaded: ${reason}`
           : 'Cascaded from predecessor update';
 
+        // Connected tasks moved due to cascade are MOVED, NOT extended.
+        // Update original_due_date to newDueStr and is_extended to FALSE so they are not marked as extended.
         await client.query(
           `UPDATE tasks
            SET start_date = $1::date,
                due_date = $2::date,
-               original_due_date = COALESCE(original_due_date, $3::date),
-               is_extended = $4,
-               modification_reason = $5,
+               original_due_date = $3::date,
+               is_extended = FALSE,
+               modification_reason = $4,
                updated_at = NOW()
-           WHERE id = $6::uuid`,
-          [newStartStr, newDueStr, succOrigDue || newDueStr, succIsExtended, cascadeReason, succId]
+           WHERE id = $5::uuid`,
+          [newStartStr, newDueStr, newDueStr, cascadeReason, succId]
         );
 
         if (actorId) {
@@ -2083,8 +2084,8 @@ async function cascadeTaskSchedule(client, rootTaskId, projectId, reason, actorI
           task_name: succ.task_name,
           start_date: newStartStr,
           due_date: newDueStr,
-          original_due_date: succOrigDue || newDueStr,
-          is_extended: succIsExtended,
+          original_due_date: newDueStr,
+          is_extended: false,
           modification_reason: cascadeReason,
         });
 
@@ -2177,7 +2178,9 @@ exports.updateTaskDueDate = async function (req, res) {
         ? `Task due date updated. Shifted ${cascaded.length} dependent task(s).`
         : 'Task due date updated successfully.',
       data: workStatuses.taskFields(result.rows[0]),
+      task: workStatuses.taskFields(result.rows[0]),
       affectedTasks: allUpdatedResult.rows.map(workStatuses.taskFields),
+      affected_tasks: allUpdatedResult.rows.map(workStatuses.taskFields),
     });
   } catch (err) {
     if (client) {
