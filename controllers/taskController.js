@@ -1023,9 +1023,6 @@ exports.createTask = async function (req, res) {
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
       return res.status(400).json({ success: false, error: 'predecessor_task_ids must be an array of task UUIDs.' });
     }
-    if (predecessorIds.length) {
-      return res.status(409).json({ success: false, error: 'Task dependencies must be proposed through the schedule simulator and approved before they are added.' });
-    }
 
 
     const priority = (
@@ -1685,7 +1682,7 @@ exports.updateTask = async function (req, res) {
       (Object.hasOwn(body, 'due_date') || Object.hasOwn(body, 'dueDate')) && !sameDate(dueInput, current.due_date) ||
       (Object.hasOwn(body, 'estimated_duration_days') || Object.hasOwn(body, 'estimatedDurationDays')) && !sameDuration ||
       rawPredecessors !== undefined && JSON.stringify(currentPredecessors) !== JSON.stringify(proposedPredecessors);
-    if (scheduleWouldChange && !body.direct && !body.allowDirectDate && task.task_name !== 'Turnover of the documents') {
+    if (scheduleWouldChange && !body.direct && !body.allowDirectDate && task.task_name !== 'Turnover of the documents' && req.user.role !== 'admin' && req.user.role !== 'owner') {
       await client.query('ROLLBACK'); transaction = false;
       return res.status(409).json({ success: false, error: 'Schedule changes must be simulated and approved before applying.',
         nextStep: 'POST /projects/:code/schedule/simulations, then submit a schedule change request.' });
