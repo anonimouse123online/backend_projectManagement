@@ -171,12 +171,6 @@ exports.getStats = async (req, res) => {
       {
         label: 'Active Projects',
         value: String(activeProjects),
-        trend:
-          activeProjects > 0
-            ? '+100%'
-            : '0%',
-        up:
-          activeProjects > 0,
         bg: '#EFF6FF',
         clr: '#3B82F6',
         icon: '📋'
@@ -185,12 +179,6 @@ exports.getStats = async (req, res) => {
       {
         label: 'Total Tasks',
         value: String(totalTasks),
-        trend:
-          totalTasks > 0
-            ? '+100%'
-            : '0%',
-        up:
-          totalTasks > 0,
         bg: '#F0FDF4',
         clr: '#22C55E',
         icon: '✅'
@@ -199,11 +187,6 @@ exports.getStats = async (req, res) => {
       {
         label: 'Issues',
         value: String(issuesReported),
-        trend:
-          issuesReported > 0
-            ? '+100%'
-            : '0%',
-        up: false,
         bg: '#FEF2F2',
         clr: '#EF4444',
         icon: '⚠️'
