@@ -275,7 +275,7 @@ exports.getStats = async (req, res) => {
       },
 
       {
-        label: 'Issues Reported',
+        label: 'Issues',
         value: String(issuesReported),
         trend:
           issuesReported > 0
